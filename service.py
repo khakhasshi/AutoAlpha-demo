@@ -230,6 +230,60 @@ def score_series() -> list[dict[str, Any]]:
     return rows
 
 
+def journal_runs(limit: int = 80) -> list[dict[str, Any]]:
+    path = ROOT / "journal" / "runs.jsonl"
+    if not path.exists():
+        return []
+    rows = []
+    best = float("-inf")
+    for line in path.read_text(encoding="utf-8").splitlines():
+        if not line.strip():
+            continue
+        try:
+            rec = json.loads(line)
+        except Exception:
+            continue
+        score = rec.get("score")
+        if isinstance(score, int | float):
+            prev_best = None if best == float("-inf") else best
+            is_new_best = score > best
+            best = max(best, float(score))
+            best_score = best
+            delta_to_best = None if prev_best is None else float(score) - prev_best
+        else:
+            is_new_best = False
+            best_score = None if best == float("-inf") else best
+            delta_to_best = None
+        slim = {
+            "iter_id": rec.get("iter_id"),
+            "ts": rec.get("ts"),
+            "status": rec.get("status"),
+            "decision": rec.get("decision"),
+            "score": score,
+            "best_score": best_score,
+            "delta_to_previous_best": delta_to_best,
+            "is_new_best": is_new_best,
+            "elapsed_sec": rec.get("elapsed_sec"),
+            "horizon": rec.get("horizon"),
+            "label_kind": rec.get("label_kind"),
+            "rank_ic_ir": rec.get("rank_ic_ir"),
+            "rank_ic_mean": rec.get("rank_ic_mean"),
+            "pearson_ic_mean": rec.get("pearson_ic_mean"),
+            "sharpe": rec.get("sharpe"),
+            "annual_return": rec.get("annual_return"),
+            "max_drawdown": rec.get("max_drawdown"),
+            "annual_turnover": rec.get("annual_turnover"),
+            "monotonicity": rec.get("monotonicity"),
+            "excess_sharpe": rec.get("excess_sharpe"),
+            "error": rec.get("error"),
+            "score_anomaly": rec.get("score_anomaly"),
+            "note_path": rec.get("note_path"),
+            "factor_library": rec.get("factor_library"),
+        }
+        rows.append(slim)
+    return rows[-limit:]
+
+
 def build_prompt() -> list[dict[str, str]]:
     program = read_text("program.md")
     evaluation = read_text("evaluation.md")
@@ -670,6 +724,16 @@ INDEX_HTML = r"""<!doctype html>
         </div>
       </section>
       <section>
+        <div class="chartHead">
+          <div>
+            <h2 style="margin:0 0 4px">Runner 实验记录</h2>
+            <div class="status" id="runsHint">实时读取 journal/runs.jsonl</div>
+          </div>
+          <button onclick="refreshRuns()">刷新实验记录</button>
+        </div>
+        <div class="logCards" id="runsView" style="height:420px"></div>
+      </section>
+      <section>
         <div class="tabs">
           <button id="tab_audit" onclick="setLog('audit')">审计日志</button>
           <button id="tab_action" onclick="setLog('action')">行动日志</button>
@@ -798,6 +862,64 @@ INDEX_HTML = r"""<!doctype html>
       if (run.decision === 'REJECTED' || rec.event?.includes('paused') || rec.event?.includes('stop')) return 'warn';
       if (run.decision === 'ACCEPTED' || rec.event?.includes('saved') || rec.event?.includes('test')) return 'ok';
       return 'info';
+    }
+    function runCardClass(run) {
+      if (run.score_anomaly) return 'warn';
+      if (run.status === 'crash' || run.decision === 'REVERTED') return 'bad';
+      if (run.decision === 'ACCEPTED') return 'ok';
+      if (run.decision === 'REJECTED') return 'warn';
+      return 'info';
+    }
+    function runSummary(run) {
+      if (run.error) return shortText(run.error, 360);
+      const gap = Number(run.delta_to_previous_best);
+      const gapText = Number.isFinite(gap) ? `gap ${gap >= 0 ? '+' : ''}${fmt(gap)}` : 'first baseline';
+      return `score ${fmt(Number(run.score))} · ${gapText} · rank_ic_ir ${fmt(Number(run.rank_ic_ir), 3)} · sharpe ${fmt(Number(run.sharpe), 3)}`;
+    }
+    function renderRunCards(rows) {
+      const view = $('runsView');
+      view.innerHTML = '';
+      const reversed = rows.slice().reverse();
+      $('runsHint').textContent = `journal/runs.jsonl · ${rows.length} runs · 最新在上`;
+      if (!reversed.length) {
+        appendText(view, 'div', 'status', '暂无 runner 实验记录。');
+        return;
+      }
+      reversed.forEach(run => {
+        const card = document.createElement('article');
+        card.className = `logCard ${runCardClass(run)}`;
+        const top = document.createElement('div');
+        top.className = 'logTop';
+        const label = run.is_new_best ? 'NEW BEST' : (run.decision || run.status || '--');
+        appendText(top, 'div', 'logTitle', `Run #${String(run.iter_id).padStart(4, '0')} · ${label}`);
+        appendText(top, 'div', 'logTime', run.ts || '');
+        card.appendChild(top);
+        appendText(card, 'div', 'logSummary', runSummary(run));
+        const chips = document.createElement('div');
+        chips.className = 'chips';
+        [
+          `score ${fmt(Number(run.score))}`,
+          `best ${fmt(Number(run.best_score))}`,
+          `H ${run.horizon ?? '--'}`,
+          `turnover ${fmt(Number(run.annual_turnover), 1)}`,
+          `mdd ${pct(run.max_drawdown)}`,
+          `ret ${pct(run.annual_return)}`,
+          run.score_anomaly ? 'score anomaly' : null,
+        ].filter(Boolean).forEach(c => appendText(chips, 'span', 'chip', c));
+        card.appendChild(chips);
+        if (run.note_path || run.factor_library) {
+          appendText(card, 'div', 'logSummary', [run.note_path, run.factor_library].filter(Boolean).join(' · '));
+        }
+        const details = document.createElement('details');
+        const summary = document.createElement('summary');
+        summary.textContent = '实验详情';
+        const pre = document.createElement('pre');
+        pre.textContent = JSON.stringify(run, null, 2);
+        details.appendChild(summary);
+        details.appendChild(pre);
+        card.appendChild(details);
+        view.appendChild(card);
+      });
     }
     function logSummary(rec) {
       const p = rec.payload || {};
@@ -969,14 +1091,18 @@ INDEX_HTML = r"""<!doctype html>
       const rows = await api('/api/scores');
       drawScoreChart(rows);
     }
+    async function refreshRuns() {
+      const rows = await api('/api/runs?limit=80');
+      renderRunCards(rows);
+    }
     async function appendManualLog() {
       await api('/api/logs', {method:'POST', body:JSON.stringify({kind:$('manual_kind').value, text:$('manual_text').value})});
       $('manual_text').value = '';
       await refreshLog();
     }
-    async function refreshAll(){ await Promise.all([refreshStatus(), refreshConfig(), refreshLog(), refreshScores()]); }
+    async function refreshAll(){ await Promise.all([refreshStatus(), refreshConfig(), refreshLog(), refreshScores(), refreshRuns()]); }
     refreshAll();
-    setInterval(() => { refreshStatus(); refreshLog(); refreshScores(); }, 3000);
+    setInterval(() => { refreshStatus(); refreshLog(); refreshScores(); refreshRuns(); }, 3000);
   </script>
 </body>
 </html>"""
@@ -1016,6 +1142,10 @@ class Handler(BaseHTTPRequestHandler):
                 self._json(load_config(include_secret=False))
             elif self.path.startswith("/api/scores"):
                 self._json(score_series())
+            elif self.path.startswith("/api/runs"):
+                query = self.path.split("?", 1)[1] if "?" in self.path else ""
+                params = dict(part.split("=", 1) for part in query.split("&") if "=" in part)
+                self._json(journal_runs(limit=int(params.get("limit", "80"))))
             elif self.path.startswith("/api/logs"):
                 query = self.path.split("?", 1)[1] if "?" in self.path else ""
                 params = dict(part.split("=", 1) for part in query.split("&") if "=" in part)
