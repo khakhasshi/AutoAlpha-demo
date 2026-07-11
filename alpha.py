@@ -3,16 +3,10 @@ alpha.py — AutoAlpha 教学版 baseline（demo v1）
 ================================================================
 
 供 AutoAlpha 讲习课演示使用。本版本是最简可运行起点：
-    · 5 个经典量价因子（反转 / 动量 / 波动 / 流动性 / 振幅）
+    · 10 个经典量价因子（反转 / 动量 / 波动 / 流动性 / 振幅 / ...）
     · 截面 winsorize + zscore 标准化
-    · 线性等权组合
-    · 无 ML 模型训练（组合是纯线性等权，无需 fit）
-
-学员可以由此出发做的典型练习：
-    · 加一个新因子（如隔夜反转、上下影线、跳空频率）
-    · 把等权改成 IC_IR 加权
-    · 改 HORIZON（1 / 3 / 5 / 10 / 20）
-    · 在 prepare.primary_score 里把 Sharpe / MDD 加进公式
+    · IC_IR 加权（252 天滚动窗口）
+    · HORIZON=1, LABEL_KIND='rank'
 
 契约（详见 program.md / evaluation.md）：
     · 必须导出 HORIZON: int ∈ prepare.ALLOWED_HORIZONS
@@ -37,12 +31,12 @@ FACTOR_NAME: str = 'demo_v1_h1_mom10_10factors_icir_weight_ranklabel_hl10_ewm60_
 
 # ITER_NOTE：每次实验必须声明（runner 强制校验）
 ITER_NOTE: dict = {
-    'op_type': 'combine_method',
-    'hypothesis': '将 IC_IR 权重估计从 EWM(60) 改为滚动窗口(252)，预期权重更稳定、提升 rank_ic_ir。',
-    'change': '修改 _icir_weights 函数，使用 252 天滚动窗口计算 IC 均值与标准差替代指数加权。',
-    'expected': 'score 可能提升 0.02~0.10，rank_ic_ir 略增。',
-    'parent_iter': 48,
-    'reasoning': 'EWM 对近期噪声敏感，滚动窗口能平滑长期预测能力，避免过拟合近期信号。',
+    'op_type': 'modify_factor',
+    'hypothesis': '将波动率因子窗口从 20 天缩短为 10 天，使其对 HORIZON=1 更敏感，预期提高 rank_ic_ir。',
+    'change': '修改 f_volatility_20，将 rolling 窗口改为 10 天，min_periods=5，函数名改为 f_volatility_10；更新 FACTORS 列表。',
+    'expected': 'score 可能提升 0.02–0.10，rank_ic_ir 略增。',
+    'parent_iter': 58,
+    'reasoning': '之前缩短 HORIZON 和 hl_range 窗口都带来了显著提升，推测其他长窗口因子（如波动率）缩短后也能提供更及时的低波动异象信号，同时与现有因子相关性可接受。',
 }
 
 
@@ -95,12 +89,12 @@ def f_momentum_10(panel: pd.DataFrame) -> pd.DataFrame:
     return close.pct_change(10, fill_method=None)
 
 
-def f_volatility_20(panel: pd.DataFrame) -> pd.DataFrame:
-    '''20 日波动率（取负）：低波动异象。
-    低波动股票长期收益反而更好 —— 学界经典发现。'''
+def f_volatility_10(panel: pd.DataFrame) -> pd.DataFrame:
+    '''10 日波动率（取负）：低波动异象。
+    低波动股票长期收益反而更好 —— 学界经典发现。缩短窗口以匹配 HORIZON=1。'''
     close = _pivot(panel, 'close')
     ret = close.pct_change(fill_method=None)
-    return -ret.rolling(20, min_periods=10).std()
+    return -ret.rolling(10, min_periods=5).std()
 
 
 def f_amihud_20(panel: pd.DataFrame) -> pd.DataFrame:
@@ -178,7 +172,7 @@ def f_volume_volatility_20(panel: pd.DataFrame) -> pd.DataFrame:
 FACTORS = [
     f_reversal_3,
     f_momentum_10,
-    f_volatility_20,
+    f_volatility_10,
     f_amihud_20,
     f_hl_range_10,
     f_gap_reversal_5,
