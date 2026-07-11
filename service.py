@@ -394,6 +394,8 @@ def one_iteration() -> bool:
     previous = ALPHA_PATH.read_text(encoding="utf-8")
     backup_path = STATE_DIR / f"alpha_before_service_iter_{iteration:04d}.py"
     backup_path.write_text(previous, encoding="utf-8")
+    with STATE_LOCK:
+        RUNTIME["status"] = "replacing_alpha"
     ALPHA_PATH.write_text(alpha_py, encoding="utf-8")
     append_log("action", "alpha_replaced", {"iteration": iteration, "backup": str(backup_path)})
 
@@ -402,6 +404,8 @@ def one_iteration() -> bool:
         RUNTIME["status"] = "evaluating"
     code, output = run_cmd([py, str(RUNNER), "once"], timeout=3600)
     rec = last_run_record()
+    with STATE_LOCK:
+        RUNTIME["status"] = "recording_delivery"
     append_log("delivery", "iteration_evaluated", {
         "iteration": iteration,
         "returncode": code,
@@ -529,7 +533,21 @@ INDEX_HTML = r"""<!doctype html>
     #scoreChart { width:100%; height:280px; border:1px solid var(--line); border-radius:8px; background:#fbfcfe; display:block; }
     .legend { display:flex; gap:14px; flex-wrap:wrap; font-size:12px; color:var(--muted); margin-top:8px; }
     .dot { width:9px; height:9px; border-radius:50%; display:inline-block; margin-right:5px; }
+    .flowWrap { display:grid; gap:12px; }
+    .flow { display:grid; grid-template-columns:repeat(4, minmax(0, 1fr)); gap:10px; position:relative; }
+    .flowStep { border:1px solid var(--line); border-radius:8px; padding:11px 12px; min-height:74px; background:#fafafa; position:relative; transition:all .2s ease; }
+    .flowStep::after { content:""; position:absolute; top:50%; right:-10px; width:10px; height:2px; background:#cbd5e1; }
+    .flowStep:nth-child(4)::after, .flowStep:nth-child(8)::after { display:none; }
+    .flowStep small { display:block; color:var(--muted); font-size:11px; margin-bottom:5px; }
+    .flowStep b { display:block; font-size:14px; margin-bottom:4px; }
+    .flowStep span { color:var(--muted); font-size:12px; line-height:1.35; }
+    .flowStep.done { border-color:#a7f3d0; background:#ecfdf3; }
+    .flowStep.active { border-color:#1d4ed8; background:#eff6ff; box-shadow:0 0 0 3px rgba(29,78,216,.12); }
+    .flowStep.wait { border-color:#fbbf24; background:#fffbeb; }
+    .flowStep.error { border-color:#fca5a5; background:#fff1f2; }
+    .flowStatus { color:var(--muted); font-size:13px; }
     @media (max-width: 900px) { main { grid-template-columns:1fr; } .log { height:480px; } }
+    @media (max-width: 1100px) { .flow { grid-template-columns:repeat(2, minmax(0, 1fr)); } .flowStep:nth-child(even)::after { display:none; } .flowStep:nth-child(4)::after { display:none; } }
   </style>
 </head>
 <body>
@@ -603,6 +621,27 @@ INDEX_HTML = r"""<!doctype html>
         </div>
       </section>
       <section>
+        <div class="chartHead">
+          <div>
+            <h2 style="margin:0 0 4px">研究流程图</h2>
+            <div class="flowStatus" id="flowStatus">等待状态同步</div>
+          </div>
+          <span class="pill" id="flowPill">idle</span>
+        </div>
+        <div class="flowWrap">
+          <div class="flow">
+            <div class="flowStep" data-step="config"><small>01</small><b>API 配置</b><span>LM Studio / 兼容 API 就绪</span></div>
+            <div class="flowStep" data-step="context"><small>02</small><b>读取上下文</b><span>program、evaluation、alpha、best</span></div>
+            <div class="flowStep" data-step="model"><small>03</small><b>生成候选</b><span>模型产出完整 alpha.py</span></div>
+            <div class="flowStep" data-step="replace"><small>04</small><b>替换文件</b><span>备份旧版并写入候选</span></div>
+            <div class="flowStep" data-step="evaluate"><small>05</small><b>运行回测</b><span>runner.py once 评分</span></div>
+            <div class="flowStep" data-step="decision"><small>06</small><b>接受/回滚</b><span>ACCEPTED 留存，否则回滚</span></div>
+            <div class="flowStep" data-step="deliver"><small>07</small><b>交付记录</b><span>score、日志、图表刷新</span></div>
+            <div class="flowStep" data-step="loop"><small>08</small><b>下一轮/暂停</b><span>继续迭代或等待人工复核</span></div>
+          </div>
+        </div>
+      </section>
+      <section>
         <div class="tabs">
           <button id="tab_audit" class="active" onclick="setLog('audit')">审计日志</button>
           <button id="tab_action" onclick="setLog('action')">行动日志</button>
@@ -625,6 +664,51 @@ INDEX_HTML = r"""<!doctype html>
       const data = await api('/api/status');
       $('runPill').textContent = data.runtime.status;
       $('statusText').textContent = `running=${data.runtime.running} iteration=${data.runtime.iteration} last_error=${data.runtime.last_error || 'none'}`;
+      updateFlow(data.runtime);
+    }
+    function updateFlow(runtime) {
+      const status = runtime.status || 'idle';
+      const activeByStatus = {
+        idle: 'config',
+        starting: 'context',
+        waiting_for_api_config: 'config',
+        calling_model: 'model',
+        replacing_alpha: 'replace',
+        evaluating: 'evaluate',
+        recording_delivery: 'deliver',
+        sleeping: 'loop',
+        stopping: 'loop',
+        error_sleeping: 'loop',
+        waiting_for_human_score_anomaly: 'loop'
+      };
+      const order = ['config','context','model','replace','evaluate','decision','deliver','loop'];
+      const active = activeByStatus[status] || 'loop';
+      const activeIdx = order.indexOf(active);
+      document.querySelectorAll('.flowStep').forEach(node => {
+        const step = node.dataset.step;
+        const idx = order.indexOf(step);
+        node.classList.remove('active', 'done', 'wait', 'error');
+        if (idx < activeIdx && runtime.running) node.classList.add('done');
+        if (step === active) node.classList.add('active');
+        if (status === 'waiting_for_api_config' && step === 'config') node.classList.add('wait');
+        if (status === 'waiting_for_human_score_anomaly' && step === 'loop') node.classList.add('wait');
+        if (status === 'error_sleeping' && step === 'loop') node.classList.add('error');
+      });
+      const labels = {
+        idle: '服务已启动，等待你点击“启动持续迭代”。',
+        starting: '正在启动后台循环。',
+        waiting_for_api_config: '等待填写并验证兼容 API 配置。',
+        calling_model: '正在把研究上下文发给模型生成候选 alpha.py。',
+        replacing_alpha: '正在备份旧版并写入模型生成的 alpha.py。',
+        evaluating: '正在运行 runner.py once，等待 score 和回测指标。',
+        recording_delivery: '正在写入交付日志并刷新 score 曲线。',
+        sleeping: '本轮已交付，等待下一轮迭代间隔。',
+        stopping: '正在停止后台循环。',
+        error_sleeping: '上一轮出错，服务短暂停顿后可复查日志。',
+        waiting_for_human_score_anomaly: '发现 score anomaly，已暂停等待人工复核。'
+      };
+      $('flowStatus').textContent = labels[status] || `当前状态：${status}`;
+      $('flowPill').textContent = status;
     }
     async function refreshConfig() {
       const cfg = await api('/api/config');
