@@ -28,6 +28,7 @@ ROOT = Path(__file__).resolve().parent
 STATE_DIR = ROOT / "service_state"
 LOG_DIR = STATE_DIR / "logs"
 CONFIG_PATH = STATE_DIR / "config.json"
+MEMORY_PATH = STATE_DIR / "memory.json"
 ALPHA_PATH = ROOT / "alpha.py"
 PYTHON = ROOT / ".venv" / "bin" / "python"
 RUNNER = ROOT / "runner.py"
@@ -46,6 +47,7 @@ DEFAULT_CONFIG: dict[str, Any] = {
     "temperature": 0.2,
     "iteration_sleep_sec": 5,
     "auto_commit_accepted": False,
+    "memory_enabled": True,
     "enabled": False,
 }
 
@@ -72,6 +74,20 @@ def ensure_state() -> None:
         path.touch(exist_ok=True)
     if not CONFIG_PATH.exists():
         CONFIG_PATH.write_text(json.dumps(DEFAULT_CONFIG, indent=2), encoding="utf-8")
+    if not MEMORY_PATH.exists():
+        MEMORY_PATH.write_text(json.dumps(default_memory(), indent=2), encoding="utf-8")
+
+
+def default_memory() -> dict[str, Any]:
+    return {
+        "created_at": now_iso(),
+        "updated_at": None,
+        "summary": "No service iterations have been memorized yet.",
+        "best_known": None,
+        "avoid": [],
+        "promising": [],
+        "recent": [],
+    }
 
 
 def load_config(include_secret: bool = True) -> dict[str, Any]:
@@ -97,6 +113,7 @@ def save_config(data: dict[str, Any]) -> dict[str, Any]:
     cfg["temperature"] = float(cfg.get("temperature") or 0.2)
     cfg["iteration_sleep_sec"] = max(0, int(cfg.get("iteration_sleep_sec") or 0))
     cfg["auto_commit_accepted"] = bool(cfg.get("auto_commit_accepted"))
+    cfg["memory_enabled"] = bool(cfg.get("memory_enabled", True))
     CONFIG_PATH.write_text(json.dumps(cfg, indent=2, ensure_ascii=False), encoding="utf-8")
     append_log("audit", "config_saved", {
         "base_url": cfg.get("base_url"),
@@ -104,6 +121,7 @@ def save_config(data: dict[str, Any]) -> dict[str, Any]:
         "has_api_key": bool(cfg.get("api_key")),
         "iteration_sleep_sec": cfg.get("iteration_sleep_sec"),
         "auto_commit_accepted": cfg.get("auto_commit_accepted"),
+        "memory_enabled": cfg.get("memory_enabled"),
     })
     return cfg
 
@@ -130,6 +148,158 @@ def read_log(kind: str, limit: int = 200) -> list[dict[str, Any]]:
         except Exception:
             out.append({"ts": "", "kind": kind, "event": "parse_error", "payload": {"raw": line}})
     return out
+
+
+def load_memory() -> dict[str, Any]:
+    ensure_state()
+    try:
+        data = json.loads(MEMORY_PATH.read_text(encoding="utf-8"))
+    except Exception:
+        data = default_memory()
+    base = default_memory()
+    base.update(data)
+    if not base.get("recent") and not base.get("updated_at"):
+        seeded = seed_memory_from_journal(base)
+        if seeded.get("recent"):
+            save_memory(seeded)
+            return seeded
+    return base
+
+
+def seed_memory_from_journal(memory: dict[str, Any]) -> dict[str, Any]:
+    runs = journal_runs(limit=80)
+    if not runs:
+        return memory
+    accepted = [r for r in runs if r.get("decision") == "ACCEPTED"]
+    best = max(accepted, key=lambda r: r.get("score") or float("-inf"), default=None)
+    recent_items = []
+    for run in runs[-12:]:
+        recent_items.append({
+            "ts": run.get("ts"),
+            "service_iteration": None,
+            "runner_iter": run.get("iter_id"),
+            "decision": run.get("decision") or run.get("status"),
+            "score": run.get("score"),
+            "summary": f"Historical runner record: {run.get('decision') or run.get('status')}",
+            "research_note": run.get("note_path"),
+            "error": run.get("error"),
+            "score_anomaly": run.get("score_anomaly"),
+        })
+    memory["recent"] = recent_items
+    if best:
+        memory["best_known"] = {
+            "runner_iter": best.get("iter_id"),
+            "score": best.get("score"),
+            "summary": "Seeded from journal/runs.jsonl best accepted run.",
+            "factor_library": best.get("factor_library"),
+        }
+    memory["promising"] = [
+        f"runner#{r.get('iter_id')} ACCEPTED score={r.get('score')}: {r.get('factor_library') or r.get('note_path')}"
+        for r in accepted[-8:]
+    ]
+    memory["avoid"] = [
+        short_memory_line({
+            "runner_iter": r.get("iter_id"),
+            "decision": r.get("decision") or r.get("status"),
+            "score": r.get("score"),
+            "summary": r.get("error") or f"Rejected score={r.get('score')} below best={r.get('best_score')}",
+        })
+        for r in runs
+        if r.get("decision") in {"REJECTED", "REVERTED"} or r.get("status") == "crash"
+    ][-12:]
+    if best:
+        memory["summary"] = (
+            f"Seeded from journal: best accepted runner#{best.get('iter_id')} "
+            f"score={best.get('score')}. Avoid repeating recent rejected/crashed variants."
+        )
+    else:
+        memory["summary"] = "Seeded from journal, but no accepted run found yet."
+    return memory
+
+
+def save_memory(memory: dict[str, Any]) -> None:
+    ensure_state()
+    memory["updated_at"] = now_iso()
+    MEMORY_PATH.write_text(json.dumps(json_safe(memory), indent=2, ensure_ascii=False), encoding="utf-8")
+
+
+def reset_memory() -> dict[str, Any]:
+    memory = default_memory()
+    save_memory(memory)
+    append_log("audit", "memory_reset", {})
+    return memory
+
+
+def memory_prompt_text(memory: dict[str, Any]) -> str:
+    recent = memory.get("recent", [])[-8:]
+    return json.dumps({
+        "summary": memory.get("summary"),
+        "best_known": memory.get("best_known"),
+        "avoid": memory.get("avoid", [])[-12:],
+        "promising": memory.get("promising", [])[-12:],
+        "recent": recent,
+    }, ensure_ascii=False, indent=2)
+
+
+def update_memory_after_iteration(
+    iteration: int,
+    proposal: dict[str, Any],
+    rec: dict[str, Any] | None,
+) -> dict[str, Any]:
+    memory = load_memory()
+    run = rec or {}
+    decision = run.get("decision") or run.get("status") or "unknown"
+    score = run.get("score")
+    item = {
+        "ts": now_iso(),
+        "service_iteration": iteration,
+        "runner_iter": run.get("iter_id"),
+        "decision": decision,
+        "score": score,
+        "summary": proposal.get("summary"),
+        "research_note": proposal.get("research_note"),
+        "error": run.get("error"),
+        "score_anomaly": run.get("score_anomaly"),
+    }
+    recent = memory.get("recent", [])
+    recent.append(item)
+    memory["recent"] = recent[-20:]
+
+    if run.get("decision") == "ACCEPTED":
+        memory["best_known"] = {
+            "runner_iter": run.get("iter_id"),
+            "score": score,
+            "summary": proposal.get("summary"),
+            "factor_library": run.get("factor_library"),
+        }
+        memory["promising"] = (memory.get("promising", []) + [short_memory_line(item)])[-12:]
+    elif run.get("status") == "crash" or run.get("decision") == "REVERTED":
+        memory["avoid"] = (memory.get("avoid", []) + [short_memory_line(item)])[-12:]
+    elif run.get("decision") == "REJECTED":
+        memory["avoid"] = (memory.get("avoid", []) + [short_memory_line(item)])[-12:]
+    if run.get("score_anomaly"):
+        memory["summary"] = "Recent run triggered score_anomaly; pause score-only optimization and consider product-quality metrics before similar horizon/score tradeoff experiments."
+    elif memory.get("best_known"):
+        best = memory["best_known"]
+        memory["summary"] = f"Best remembered run #{best.get('runner_iter')} score={best.get('score')}; avoid repeating recent rejected/crashed variants."
+    else:
+        memory["summary"] = "No accepted service-generated improvement remembered yet; prioritize simple, single-hypothesis changes."
+    save_memory(memory)
+    append_log("research", "memory_updated", {
+        "iteration": iteration,
+        "decision": decision,
+        "score": score,
+        "recent_count": len(memory.get("recent", [])),
+    })
+    return memory
+
+
+def short_memory_line(item: dict[str, Any]) -> str:
+    text = item.get("summary") or item.get("research_note") or item.get("error") or "iteration"
+    text = str(text).replace("\n", " ")
+    if len(text) > 180:
+        text = text[:179] + "…"
+    return f"runner#{item.get('runner_iter')} {item.get('decision')} score={item.get('score')}: {text}"
 
 
 def json_safe(value: Any) -> Any:
@@ -285,6 +455,15 @@ def journal_runs(limit: int = 80) -> list[dict[str, Any]]:
 
 
 def build_prompt() -> list[dict[str, str]]:
+    cfg = load_config()
+    memory_block = ""
+    if cfg.get("memory_enabled", True):
+        memory_block = f"""
+Persistent service memory:
+{memory_prompt_text(load_memory())}
+
+Use this memory to avoid repeating failed ideas and to build on accepted or promising results.
+"""
     program = read_text("program.md")
     evaluation = read_text("evaluation.md")
     alpha = read_text("alpha.py", max_chars=40000)
@@ -305,6 +484,7 @@ Rules:
 - Keep the public contract: HORIZON, LABEL_KIND, ITER_NOTE, FACTORS, run(train_panel, val_panel).
 - Use only train data to estimate any fitted parameters. Validation is for runner evaluation only.
 - Prefer a single clear hypothesis likely to improve prepare.primary_score, unless the latest logs suggest a score anomaly.
+{memory_block}
 
 Current runner status:
 {status}
@@ -479,6 +659,8 @@ def one_iteration() -> bool:
         "runner_tail": output[-4000:],
         "run_record": rec,
     })
+    if cfg.get("memory_enabled", True):
+        update_memory_after_iteration(iteration, proposal, rec)
     if rec and rec.get("score_anomaly"):
         append_log("audit", "paused_for_score_anomaly", {
             "iteration": iteration,
@@ -628,6 +810,9 @@ INDEX_HTML = r"""<!doctype html>
     .flowStep.wait { border-color:#fbbf24; background:#fffbeb; }
     .flowStep.error { border-color:#fca5a5; background:#fff1f2; }
     .flowStatus { color:var(--muted); font-size:13px; }
+    .memoryBox { border:1px solid var(--line); border-radius:8px; padding:10px; background:#fbfcfe; display:grid; gap:8px; }
+    .memoryBox ul { margin:0; padding-left:18px; color:#344054; font-size:12px; line-height:1.45; }
+    .memoryBox p { margin:0; color:#344054; font-size:13px; line-height:1.45; }
     @media (max-width: 900px) { main { grid-template-columns:1fr; } .log { height:480px; } }
     @media (max-width: 1100px) { .flow { grid-template-columns:repeat(2, minmax(0, 1fr)); } .flowStep:nth-child(even)::after { display:none; } .flowStep:nth-child(4)::after { display:none; } }
   </style>
@@ -664,6 +849,7 @@ INDEX_HTML = r"""<!doctype html>
         </div>
       </div>
       <label class="row"><input id="auto_commit_accepted" type="checkbox" style="width:auto" /> accepted 后自动 git commit alpha.py</label>
+      <label class="row"><input id="memory_enabled" type="checkbox" style="width:auto" /> 启用连续上下文记忆</label>
       <div class="row" style="margin-top:14px">
         <button class="primary" onclick="saveConfig()">保存配置</button>
         <button onclick="fillLmStudio()">填入 LM Studio</button>
@@ -671,6 +857,17 @@ INDEX_HTML = r"""<!doctype html>
         <button onclick="refreshAll()">刷新</button>
       </div>
       <pre id="testResult" class="muted" style="margin-top:12px"></pre>
+      <hr style="border:0;border-top:1px solid var(--line);margin:18px 0" />
+      <h2>连续记忆</h2>
+      <div class="memoryBox">
+        <p id="memorySummary">loading...</p>
+        <div class="chips" id="memoryChips"></div>
+        <details>
+          <summary>查看记忆详情</summary>
+          <pre id="memoryDetails"></pre>
+        </details>
+        <button onclick="resetMemory()">清空记忆</button>
+      </div>
       <hr style="border:0;border-top:1px solid var(--line);margin:18px 0" />
       <h2>人工追加日志</h2>
       <label>日志类型</label>
@@ -810,13 +1007,15 @@ INDEX_HTML = r"""<!doctype html>
       const cfg = await api('/api/config');
       for (const k of ['base_url','api_key','model','temperature','iteration_sleep_sec']) $(k).value = cfg[k] || '';
       $('auto_commit_accepted').checked = !!cfg.auto_commit_accepted;
+      $('memory_enabled').checked = cfg.memory_enabled !== false;
     }
     async function saveConfig() {
       await api('/api/config', {method:'POST', body:JSON.stringify({
         base_url:$('base_url').value, api_key:$('api_key').value, model:$('model').value,
         temperature:parseFloat($('temperature').value || '0.2'),
         iteration_sleep_sec:parseInt($('iteration_sleep_sec').value || '5', 10),
-        auto_commit_accepted:$('auto_commit_accepted').checked
+        auto_commit_accepted:$('auto_commit_accepted').checked,
+        memory_enabled:$('memory_enabled').checked
       })});
       await refreshAll();
     }
@@ -920,6 +1119,23 @@ INDEX_HTML = r"""<!doctype html>
         card.appendChild(details);
         view.appendChild(card);
       });
+    }
+    async function refreshMemory() {
+      const memory = await api('/api/memory');
+      $('memorySummary').textContent = memory.summary || 'No memory summary yet.';
+      $('memoryDetails').textContent = JSON.stringify(memory, null, 2);
+      const chips = $('memoryChips');
+      chips.innerHTML = '';
+      [
+        `recent ${memory.recent?.length || 0}`,
+        `avoid ${memory.avoid?.length || 0}`,
+        `promising ${memory.promising?.length || 0}`,
+        memory.best_known ? `best #${memory.best_known.runner_iter}` : 'no remembered best',
+      ].forEach(c => appendText(chips, 'span', 'chip', c));
+    }
+    async function resetMemory() {
+      await api('/api/memory/reset', {method:'POST', body:'{}'});
+      await refreshMemory();
     }
     function logSummary(rec) {
       const p = rec.payload || {};
@@ -1100,9 +1316,9 @@ INDEX_HTML = r"""<!doctype html>
       $('manual_text').value = '';
       await refreshLog();
     }
-    async function refreshAll(){ await Promise.all([refreshStatus(), refreshConfig(), refreshLog(), refreshScores(), refreshRuns()]); }
+    async function refreshAll(){ await Promise.all([refreshStatus(), refreshConfig(), refreshLog(), refreshScores(), refreshRuns(), refreshMemory()]); }
     refreshAll();
-    setInterval(() => { refreshStatus(); refreshLog(); refreshScores(); refreshRuns(); }, 3000);
+    setInterval(() => { refreshStatus(); refreshLog(); refreshScores(); refreshRuns(); refreshMemory(); }, 3000);
   </script>
 </body>
 </html>"""
@@ -1140,6 +1356,8 @@ class Handler(BaseHTTPRequestHandler):
                 self._json({"runtime": runtime})
             elif self.path.startswith("/api/config"):
                 self._json(load_config(include_secret=False))
+            elif self.path.startswith("/api/memory"):
+                self._json(load_memory())
             elif self.path.startswith("/api/scores"):
                 self._json(score_series())
             elif self.path.startswith("/api/runs"):
@@ -1166,6 +1384,8 @@ class Handler(BaseHTTPRequestHandler):
             if self.path.startswith("/api/config"):
                 save_config(data)
                 self._json(load_config(include_secret=False), 200)
+            elif self.path.startswith("/api/memory/reset"):
+                self._json(reset_memory(), 200)
             elif self.path.startswith("/api/test-api"):
                 cfg = {**load_config(), **data}
                 result = test_api_config(cfg)
