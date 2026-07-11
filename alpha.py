@@ -3,7 +3,7 @@ alpha.py — AutoAlpha 教学版 baseline（demo v1）
 ================================================================
 
 供 AutoAlpha 讲习课演示使用。本版本是最简可运行起点：
-    · 11 个经典量价因子（反转 / 动量 / 波动 / 流动性 / 振幅 / ...）
+    · 13 个经典量价因子（反转 / 动量 / 波动 / 流动性 / 振幅 / ...）
     · 截面 winsorize + zscore 标准化
     · IC_IR 加权（252 天滚动窗口）
     · HORIZON=1, LABEL_KIND='rank'
@@ -27,17 +27,17 @@ import pandas as pd
 # =============================================================================
 HORIZON: int = 1                                    # 持有 1 个交易日
 LABEL_KIND: str = 'rank'                            # 截面分位作为预测目标
-FACTOR_NAME: str = 'demo_v1_h1_mom10_10factors_icir_weight_ranklabel_hl10_ewm60_roll252'
+FACTOR_NAME: str = 'demo_v1_h1_mom10_10factors_icir_weight_ranklabel_hl10_ewm60_roll252_maxret20'
 
 # ITER_NOTE：每次实验必须声明（runner 强制校验）
 ITER_NOTE: dict = {
     'op_type': 'add_factor',
-    'hypothesis': '添加下影线占比因子 f_lower_shadow_ratio_5，捕捉下影线过长后的短期反弹信号，预期与现有因子（反转、上影线等）相关性低，带来增量信息，小幅提升 score。',
-    'change': '在 FACTORS 末尾新增 f_lower_shadow_ratio_5 函数，计算 5 日平均下影线占全日振幅比例（正向）。',
+    'hypothesis': '添加最大日收益因子 f_max_ret_20，捕捉彩票效应：过去20日内最大日收益高的股票后续表现较差，预期与现有因子（波动率、反转等）相关性低，带来增量信息，小幅提升 score。',
+    'change': '在 FACTORS 末尾新增 f_max_ret_20 函数，计算 20 日滚动最大日收益并取负。',
     'expected': 'score 可能提升 0.01–0.05，rank_ic_ir 略增。',
-    'parent_iter': 64,
-    'reasoning': '下影线反映日内买方支撑，与上影线（卖方压力）互为镜像，但物理含义独立。与振幅（整体范围）、反转（收盘价变化）等因子相关性应低于 0.6，通过门控概率高。',
-    'new_factor': 'f_lower_shadow_ratio_5',
+    'parent_iter': 65,
+    'reasoning': '最大日收益因子是常见行为金融因子（Bali et al. 2011），与波动率、偏度等因子不同，额外捕捉了极端正收益后的反转。与 f_volatility_10 的相关性预计在 0.4–0.6 之间，远低于 0.85 门控阈值。',
+    'new_factor': 'f_max_ret_20',
 }
 
 
@@ -74,7 +74,7 @@ def _pivot(panel: pd.DataFrame, col: str) -> pd.DataFrame:
 
 
 # =============================================================================
-# 2. 因子库 · 12 个量价因子
+# 2. 因子库 · 13 个量价因子
 # =============================================================================
 def f_reversal_3(panel: pd.DataFrame) -> pd.DataFrame:
     '''3 日短期反转：A 股小盘股反转效应显著。
@@ -205,6 +205,15 @@ def f_lower_shadow_ratio_5(panel: pd.DataFrame) -> pd.DataFrame:
     return avg_ratio
 
 
+def f_max_ret_20(panel: pd.DataFrame) -> pd.DataFrame:
+    '''20 日最大日收益反转（取负）。
+    过去 20 日内的最大日收益高 → 彩票效应，未来倾向于表现弱；取负后高值预测下跌。'''
+    close = _pivot(panel, 'close')
+    ret = close.pct_change(fill_method=None)
+    max_ret = ret.rolling(20, min_periods=5).max()
+    return -max_ret
+
+
 # 因子注册表：新增因子时，在这里追加函数名即可
 FACTORS = [
     f_reversal_3,
@@ -218,7 +227,8 @@ FACTORS = [
     f_volume_reversal_5,
     f_volume_volatility_10,
     f_upper_shadow_ratio_5,
-    f_lower_shadow_ratio_5,  # new
+    f_lower_shadow_ratio_5,
+    f_max_ret_20,  # new
 ]
 
 
