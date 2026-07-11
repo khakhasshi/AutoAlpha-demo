@@ -33,19 +33,18 @@ import pandas as pd
 # =============================================================================
 HORIZON: int = 5                                    # 持有 5 个交易日
 LABEL_KIND: str = "market_neutral"                  # 扣除截面等权市场收益
-FACTOR_NAME: str = "demo_v1_baseline_5factors_equal_weight"
+FACTOR_NAME: str = "demo_v1_6factors_icir_weight"
 
 # ITER_NOTE：每次实验必须声明（runner 强制校验）
 ITER_NOTE: dict = {
-    "op_type":     "add_factor",
-    "hypothesis":  "隔夜跳空包含开盘情绪冲击，短期容易均值回归；与已有日内振幅、波动率、"
-                   "流动性因子应有互补信息。",
-    "change":      "新增 f_gap_reversal_5，并追加到 FACTORS；组合方法仍保持等权。",
-    "expected":    "rank IC 稳定性小幅提升，score 较 baseline 略有改善。",
-    "parent_iter": 0,
-    "reasoning":   "A 股小盘股开盘跳空常带有情绪和流动性冲击，取负号表达跳空后反转。"
-                   "使用 5 日均值降低单日噪声，保持 O(N*T) 的简单结构。",
-    "new_factor":  "f_gap_reversal_5",
+    "op_type":     "combine_method",
+    "hypothesis":  "当前 6 个因子预测强度不一致，等权会稀释强因子；用 train 段 IC_IR "
+                   "做 signed 权重，应提升验证段 IC 稳定性。",
+    "change":      "组合方法从等权改为 train 段 rank IC_IR 加权；因子集合、HORIZON、LABEL_KIND 不变。",
+    "expected":    "score 相对 run #1 小幅提升；若 train/val 风格切换明显则可能回落。",
+    "parent_iter": 1,
+    "reasoning":   "IC_IR 同时衡量因子方向和稳定性，负权重允许反向使用训练期稳定反向的因子。"
+                   "权重仅由 train 标签估计，val 段只做预测，保持三段切分语义。",
 }
 
 
@@ -178,6 +177,47 @@ def combine_equal_weight(factor_panels: list[pd.DataFrame]) -> pd.DataFrame:
     return pd.DataFrame(mean, index=common_idx, columns=common_cols)
 
 
+def _daily_rank_ic(signal: pd.DataFrame, labels: pd.DataFrame) -> pd.Series:
+    """逐日计算 rank IC。"""
+    common_idx = signal.index.intersection(labels.index)
+    common_cols = signal.columns.intersection(labels.columns)
+    sig = signal.reindex(index=common_idx, columns=common_cols).rank(axis=1)
+    lab = labels.reindex(index=common_idx, columns=common_cols).rank(axis=1)
+    return sig.corrwith(lab, axis=1).dropna()
+
+
+def _icir_weights(factor_panels: list[pd.DataFrame], train_panel: pd.DataFrame) -> np.ndarray:
+    """用 train 段标签估计各因子的 signed IC_IR 权重。"""
+    import prepare
+
+    labels = prepare.make_labels(train_panel, HORIZON, kind=LABEL_KIND)
+    raw = []
+    for f in factor_panels:
+        ic = _daily_rank_ic(f, labels)
+        if len(ic) < 20:
+            raw.append(0.0)
+            continue
+        sd = float(ic.std())
+        raw.append(0.0 if sd == 0.0 or np.isnan(sd) else float(ic.mean() / sd))
+    w = np.asarray(raw, dtype=float)
+    denom = np.nansum(np.abs(w))
+    if denom <= 0.0:
+        return np.ones(len(factor_panels), dtype=float) / len(factor_panels)
+    return w / denom
+
+
+def combine_icir_weight(factor_panels: list[pd.DataFrame], weights: np.ndarray) -> pd.DataFrame:
+    """按 train 段 IC_IR 权重组合因子。"""
+    aligned, common_idx, common_cols = _align_factors(factor_panels)
+    stacked = np.stack([f.values for f in aligned], axis=0)
+    w = weights.reshape(-1, 1, 1)
+    valid = np.isfinite(stacked)
+    weighted = np.nansum(np.where(valid, stacked, 0.0) * w, axis=0)
+    scale = np.sum(valid * np.abs(w), axis=0)
+    out = np.divide(weighted, scale, out=np.full_like(weighted, np.nan), where=scale > 0.0)
+    return pd.DataFrame(out, index=common_idx, columns=common_cols)
+
+
 # =============================================================================
 # 4. 主入口（runner 唯一调用点）
 # =============================================================================
@@ -206,19 +246,19 @@ def run(
 
     流程（三步）：
         ① 分别算 train / val 段每个因子的截面标准化面板
-        ② 等权平均得到组合信号
+        ② 用 train 段 IC_IR 权重组合因子
         ③ 再做一次截面标准化，交给 runner
 
-    注意：本教学版不做 fit + predict —— 等权组合不需要训练。
-    train / val 段各自独立算因子，各自独立标准化，各自独立返回。
+    注意：权重只用 train 段标签估计；val 段只套用权重生成预测信号。
     """
     # ① 因子计算
     fps_train = _factor_panels(train_panel)
     fps_val = _factor_panels(val_panel)
 
-    # ② 等权组合
-    sig_train_raw = combine_equal_weight(fps_train)
-    sig_val_raw = combine_equal_weight(fps_val)
+    # ② IC_IR 加权组合
+    weights = _icir_weights(fps_train, train_panel)
+    sig_train_raw = combine_icir_weight(fps_train, weights)
+    sig_val_raw = combine_icir_weight(fps_val, weights)
 
     # ③ 最终标准化
     return _finalize(sig_train_raw), _finalize(sig_val_raw)
