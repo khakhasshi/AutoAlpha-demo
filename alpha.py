@@ -3,7 +3,7 @@ alpha.py — AutoAlpha 教学版 baseline（demo v1）
 ================================================================
 
 供 AutoAlpha 讲习课演示使用。本版本是最简可运行起点：
-    · 10 个经典量价因子（反转 / 动量 / 波动 / 流动性 / 振幅 / ...）
+    · 11 个经典量价因子（反转 / 动量 / 波动 / 流动性 / 振幅 / ...）
     · 截面 winsorize + zscore 标准化
     · IC_IR 加权（252 天滚动窗口）
     · HORIZON=1, LABEL_KIND='rank'
@@ -32,12 +32,12 @@ FACTOR_NAME: str = 'demo_v1_h1_mom10_10factors_icir_weight_ranklabel_hl10_ewm60_
 # ITER_NOTE：每次实验必须声明（runner 强制校验）
 ITER_NOTE: dict = {
     'op_type': 'add_factor',
-    'hypothesis': '添加上影线占比反转因子 f_upper_shadow_ratio_5，捕捉上影线过长后的短期反转信号，预期与现有因子（振幅、反转等）相关性较低，带来增量信息，小幅提升 score。',
-    'change': '在 FACTORS 末尾新增 f_upper_shadow_ratio_5 函数，计算 5 日平均上影线占全日振幅比例并取负。',
-    'expected': 'score 可能提升 0.02–0.10，rank_ic_ir 略增。',
-    'parent_iter': 60,
-    'reasoning': '上影线反映日内卖方压力，与振幅（整体波动范围）和反转（收盘价变化）不同，可能提供独立信号。之前类似形态因子（如价量协同）被拒，但影线因子更简单且物理含义清晰，预期相关性通过门控。',
-    'new_factor': 'f_upper_shadow_ratio_5',
+    'hypothesis': '添加下影线占比因子 f_lower_shadow_ratio_5，捕捉下影线过长后的短期反弹信号，预期与现有因子（反转、上影线等）相关性低，带来增量信息，小幅提升 score。',
+    'change': '在 FACTORS 末尾新增 f_lower_shadow_ratio_5 函数，计算 5 日平均下影线占全日振幅比例（正向）。',
+    'expected': 'score 可能提升 0.01–0.05，rank_ic_ir 略增。',
+    'parent_iter': 64,
+    'reasoning': '下影线反映日内买方支撑，与上影线（卖方压力）互为镜像，但物理含义独立。与振幅（整体范围）、反转（收盘价变化）等因子相关性应低于 0.6，通过门控概率高。',
+    'new_factor': 'f_lower_shadow_ratio_5',
 }
 
 
@@ -74,7 +74,7 @@ def _pivot(panel: pd.DataFrame, col: str) -> pd.DataFrame:
 
 
 # =============================================================================
-# 2. 因子库 · 11 个量价因子
+# 2. 因子库 · 12 个量价因子
 # =============================================================================
 def f_reversal_3(panel: pd.DataFrame) -> pd.DataFrame:
     '''3 日短期反转：A 股小盘股反转效应显著。
@@ -179,7 +179,6 @@ def f_upper_shadow_ratio_5(panel: pd.DataFrame) -> pd.DataFrame:
     close = _pivot(panel, 'close')
 
     upper_shadow = high - np.maximum(open_, close)
-    lower_shadow = np.minimum(open_, close) - low
     total_range = high - low
     # avoid division by zero; total_range = 0 very rare, replace with NaN
     with np.errstate(invalid='ignore'):
@@ -187,6 +186,23 @@ def f_upper_shadow_ratio_5(panel: pd.DataFrame) -> pd.DataFrame:
     # 5-day rolling mean
     avg_ratio = ratio.rolling(5, min_periods=3).mean()
     return -avg_ratio
+
+
+def f_lower_shadow_ratio_5(panel: pd.DataFrame) -> pd.DataFrame:
+    '''5 日下影线占比动量（正向）。
+    计算每日 (min(open, close) - low) / (high - low) 的下影线占比，
+    5 日平均；下影线长表示下方支撑强，短期看涨。'''
+    high = _pivot(panel, 'high')
+    low = _pivot(panel, 'low')
+    open_ = _pivot(panel, 'open')
+    close = _pivot(panel, 'close')
+
+    lower_shadow = np.minimum(open_, close) - low
+    total_range = high - low
+    with np.errstate(invalid='ignore'):
+        ratio = lower_shadow / total_range
+    avg_ratio = ratio.rolling(5, min_periods=3).mean()
+    return avg_ratio
 
 
 # 因子注册表：新增因子时，在这里追加函数名即可
@@ -201,7 +217,8 @@ FACTORS = [
     f_skew_20,
     f_volume_reversal_5,
     f_volume_volatility_10,
-    f_upper_shadow_ratio_5,  # new
+    f_upper_shadow_ratio_5,
+    f_lower_shadow_ratio_5,  # new
 ]
 
 
