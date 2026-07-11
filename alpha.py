@@ -33,16 +33,16 @@ import pandas as pd
 # =============================================================================
 HORIZON: int = 3                                    # 持有 3 个交易日
 LABEL_KIND: str = 'rank'                            # 截面分位作为预测目标
-FACTOR_NAME: str = 'demo_v1_h3_mom10_10factors_icir_weight_ranklabel'
+FACTOR_NAME: str = 'demo_v1_h3_mom10_10factors_icir_weight_ranklabel_hl10'
 
 # ITER_NOTE：每次实验必须声明（runner 强制校验）
 ITER_NOTE: dict = {
-    'op_type': 'label_kind',
-    'hypothesis': '将标签从 market_neutral 改为 rank（截面分位）。rank 标签对极端值更稳健，可能提升 IC 的稳定性（rank_ic_ir），从而推高 score。',
-    'change': 'LABEL_KIND 从 market_neutral 改为 rank；FACTOR_NAME 更新以反映标签类型。',
-    'expected': 'score 可能提升 +0.05 ~ +0.2。rank_ic_ir 可能因目标稳健性而小幅改善。',
-    'parent_iter': 44,
-    'reasoning': '当前 best 使用 market_neutral 标签，但 rank 标签已被 literature 证明在 A 股截面中更稳健。未在其他迭代中尝试过，可作为单一假设探索。',
+    'op_type': 'modify_factor',
+    'hypothesis': '将日内振幅因子窗口从20日缩短为10日，以适应3日持有期，提升信号的时效性。预期能更好地捕捉短期振幅偏好，与现有因子低相关，带来增量信息。',
+    'change': '将 f_hl_range_20 实现中的 rolling 窗口从 20 改为 10，更新因子名为 f_hl_range_10。',
+    'expected': 'score 可能小幅提升 0.03~0.08，rank_ic_ir 略增。',
+    'parent_iter': 45,
+    'reasoning': 'runner#44 将动量窗口从20改为10成功提分，类似地缩短振幅窗口可能有效。',
 }
 
 
@@ -114,14 +114,14 @@ def f_amihud_20(panel: pd.DataFrame) -> pd.DataFrame:
     return -illiq
 
 
-def f_hl_range_20(panel: pd.DataFrame) -> pd.DataFrame:
-    '''20 日日内振幅（取负）：低振幅偏好。
-    (high - low) / close 的 20 日均值；取负让 “振幅小” 的因子得高分。'''
+def f_hl_range_10(panel: pd.DataFrame) -> pd.DataFrame:
+    '''10 日日内振幅（取负）：低振幅偏好。
+    (high - low) / close 的 10 日均值；取负让 “振幅小” 的因子得高分。'''
     high = _pivot(panel, 'high')
     low = _pivot(panel, 'low')
     close = _pivot(panel, 'close')
     rng = (high - low) / close.replace(0, np.nan)
-    return -rng.rolling(20, min_periods=10).mean()
+    return -rng.rolling(10, min_periods=5).mean()
 
 
 def f_gap_reversal_5(panel: pd.DataFrame) -> pd.DataFrame:
@@ -180,7 +180,7 @@ FACTORS = [
     f_momentum_10,
     f_volatility_20,
     f_amihud_20,
-    f_hl_range_20,
+    f_hl_range_10,
     f_gap_reversal_5,
     f_rsi_14,
     f_skew_20,
