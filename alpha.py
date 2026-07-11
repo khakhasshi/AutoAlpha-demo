@@ -31,12 +31,13 @@ FACTOR_NAME: str = 'demo_v1_h1_mom10_10factors_icir_weight_ranklabel_hl10_ewm60_
 
 # ITER_NOTE：每次实验必须声明（runner 强制校验）
 ITER_NOTE: dict = {
-    'op_type': 'modify_factor',
-    'hypothesis': '将成交量波动率因子窗口从 20 天缩短为 10 天，使其对 HORIZON=1 更敏感，预期提高 rank_ic_ir。',
-    'change': '修改 f_volume_volatility_20，将 rolling 窗口改为 10 天，min_periods=5，函数名改为 f_volume_volatility_10；更新 FACTORS 列表。',
-    'expected': 'score 可能提升 0.02–0.06，rank_ic_ir 略增。',
-    'parent_iter': 59,
-    'reasoning': '之前缩短 volatility 和 hl_range 窗口都带来了显著提升，推测其他长窗口因子（如成交量波动率）缩短后也能提供更及时的信号，同时与现有因子相关性可接受。',
+    'op_type': 'add_factor',
+    'hypothesis': '添加上影线占比反转因子 f_upper_shadow_ratio_5，捕捉上影线过长后的短期反转信号，预期与现有因子（振幅、反转等）相关性较低，带来增量信息，小幅提升 score。',
+    'change': '在 FACTORS 末尾新增 f_upper_shadow_ratio_5 函数，计算 5 日平均上影线占全日振幅比例并取负。',
+    'expected': 'score 可能提升 0.02–0.10，rank_ic_ir 略增。',
+    'parent_iter': 60,
+    'reasoning': '上影线反映日内卖方压力，与振幅（整体波动范围）和反转（收盘价变化）不同，可能提供独立信号。之前类似形态因子（如价量协同）被拒，但影线因子更简单且物理含义清晰，预期相关性通过门控。',
+    'new_factor': 'f_upper_shadow_ratio_5',
 }
 
 
@@ -73,7 +74,7 @@ def _pivot(panel: pd.DataFrame, col: str) -> pd.DataFrame:
 
 
 # =============================================================================
-# 2. 因子库 · 10 个量价因子
+# 2. 因子库 · 11 个量价因子
 # =============================================================================
 def f_reversal_3(panel: pd.DataFrame) -> pd.DataFrame:
     '''3 日短期反转：A 股小盘股反转效应显著。
@@ -168,6 +169,26 @@ def f_volume_volatility_10(panel: pd.DataFrame) -> pd.DataFrame:
     return -vol_change.rolling(10, min_periods=5).std()
 
 
+def f_upper_shadow_ratio_5(panel: pd.DataFrame) -> pd.DataFrame:
+    '''5 日上影线占比反转（取负）。
+    计算每日 (high - max(open, close)) / (high - low) 的上影线占比，
+    5 日平均后取负；上影线长表示上方压力大，短期倾向于下跌。'''
+    high = _pivot(panel, 'high')
+    low = _pivot(panel, 'low')
+    open_ = _pivot(panel, 'open')
+    close = _pivot(panel, 'close')
+
+    upper_shadow = high - np.maximum(open_, close)
+    lower_shadow = np.minimum(open_, close) - low
+    total_range = high - low
+    # avoid division by zero; total_range = 0 very rare, replace with NaN
+    with np.errstate(invalid='ignore'):
+        ratio = upper_shadow / total_range
+    # 5-day rolling mean
+    avg_ratio = ratio.rolling(5, min_periods=3).mean()
+    return -avg_ratio
+
+
 # 因子注册表：新增因子时，在这里追加函数名即可
 FACTORS = [
     f_reversal_3,
@@ -180,6 +201,7 @@ FACTORS = [
     f_skew_20,
     f_volume_reversal_5,
     f_volume_volatility_10,
+    f_upper_shadow_ratio_5,  # new
 ]
 
 
