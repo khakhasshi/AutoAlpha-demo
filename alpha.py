@@ -32,17 +32,17 @@ import pandas as pd
 # 0. 顶层契约常量（runner 直接读取）
 # =============================================================================
 HORIZON: int = 3                                    # 持有 3 个交易日
-LABEL_KIND: str = 'market_neutral'                  # 扣除截面等权市场收益
-FACTOR_NAME: str = 'demo_v1_h3_mom10_10factors_icir_weight'
+LABEL_KIND: str = 'rank'                            # 截面分位作为预测目标
+FACTOR_NAME: str = 'demo_v1_h3_mom10_10factors_icir_weight_ranklabel'
 
 # ITER_NOTE：每次实验必须声明（runner 强制校验）
 ITER_NOTE: dict = {
-    'op_type': 'modify_factor',
-    'hypothesis': '将动量因子窗口从20日缩短为10日。在HORIZON=3的短期持有下，10日动量可能比20日动量提供更及时的动量信号，减少信号滞后。',
-    'change': 'f_momentum_20 改为 f_momentum_10；FACTOR_NAME 更新。',
-    'expected': 'score 可能提升 +0.03 ~ +0.08。rank_ic_ir 可能因动量因子与短期持有更匹配而小幅改善。',
-    'parent_iter': 43,
-    'reasoning': '当前 HORIZON=3，20日动量窗口相对较长，可能包含过多与3日持有无关的价格变化，缩短窗口可增强信号时效性。',
+    'op_type': 'label_kind',
+    'hypothesis': '将标签从 market_neutral 改为 rank（截面分位）。rank 标签对极端值更稳健，可能提升 IC 的稳定性（rank_ic_ir），从而推高 score。',
+    'change': 'LABEL_KIND 从 market_neutral 改为 rank；FACTOR_NAME 更新以反映标签类型。',
+    'expected': 'score 可能提升 +0.05 ~ +0.2。rank_ic_ir 可能因目标稳健性而小幅改善。',
+    'parent_iter': 44,
+    'reasoning': '当前 best 使用 market_neutral 标签，但 rank 标签已被 literature 证明在 A 股截面中更稳健。未在其他迭代中尝试过，可作为单一假设探索。',
 }
 
 
