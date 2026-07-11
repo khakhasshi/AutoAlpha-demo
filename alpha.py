@@ -37,16 +37,17 @@ FACTOR_NAME: str = 'demo_v1_10factors_icir_weight'
 
 # ITER_NOTE：每次实验必须声明（runner 强制校验）
 ITER_NOTE: dict = {
-    'op_type':     'add_factor',
-    'hypothesis':  '新增成交量波动率反转因子，捕捉成交量不稳定性对价格的负面影响，'
-                   '低成交量波动的股票倾向于稳定，与现有因子低相关，应能补充信息。',
-    'change':      '在 FACTORS 末尾添加 f_volume_volatility_20；FACTOR_NAME 更新为 demo_v1_10factors_icir_weight。',
-    'expected':    'score +0.05 ~ +0.15，rank_ic_ir 有望小幅提升。',
-    'parent_iter': 26,
-    'reasoning':   '当前 best (run 26) score 4.6555，9 因子 IC_IR 加权已稳定；'
-                   '成交量波动率是新的维度，与现有因子（多为价格或成交量水平）相关性低，'
-                   '加入后有望提升因子多样性且不触发高相关性门控（ρ 预计 <0.5）。',
-    'new_factor':  'f_volume_volatility_20',
+    'op_type':     'modify_factor',
+    'hypothesis':  '将反转因子的窗口从5日缩短为3日，捕捉更短期的反转效应；'
+                   'A股短期反转效应通常更强，3日窗口可能提升信号纯度。',
+    'change':      '将 f_reversal_5 替换为 f_reversal_3（计算3日收益率取负）；FACTORS 列表同步更新。',
+    'expected':    'score +0.03 ~ +0.08；rank_ic_ir 可能小幅提升。',
+    'parent_iter': 29,
+    'reasoning':   '当前 best (run 29) score 4.8318，反转因子窗口5日可能偏长；'
+                   '3日反转在A股中有效性更强，且与其他因子（动量20、波动率等）相关性较低，'
+                   '改动仅影响单因子，风险可控。',
+    'old_factor':  'f_reversal_5',
+    'new_factor':  'f_reversal_3',
 }
 
 
@@ -85,11 +86,11 @@ def _pivot(panel: pd.DataFrame, col: str) -> pd.DataFrame:
 # =============================================================================
 # 2. 因子库 · 10 个量价因子
 # =============================================================================
-def f_reversal_5(panel: pd.DataFrame) -> pd.DataFrame:
-    '''5 日短期反转：A 股小盘股反转效应显著。
+def f_reversal_3(panel: pd.DataFrame) -> pd.DataFrame:
+    '''3 日短期反转：A 股小盘股反转效应显著。
     取负号：过去涨得多的股票，未来跌回来的概率高。'''
     close = _pivot(panel, 'close')
-    return -close.pct_change(5, fill_method=None)
+    return -close.pct_change(3, fill_method=None)
 
 
 def f_momentum_20(panel: pd.DataFrame) -> pd.DataFrame:
@@ -180,7 +181,7 @@ def f_volume_volatility_20(panel: pd.DataFrame) -> pd.DataFrame:
 
 # 因子注册表：新增因子时，在这里追加函数名即可
 FACTORS = [
-    f_reversal_5,
+    f_reversal_3,
     f_momentum_20,
     f_volatility_20,
     f_amihud_20,
