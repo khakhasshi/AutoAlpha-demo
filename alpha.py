@@ -6,16 +6,15 @@ import pandas as pd
 
 HORIZON: int = 1
 LABEL_KIND: str = 'rank'
-FACTOR_NAME: str = 'demo_v1_h1_idiovol20_13factors_icir_roll252'
+FACTOR_NAME: str = 'demo_v1_h1_idiovol20_13factors_icir_roll126'
 
 ITER_NOTE: dict = {
-    'op_type': 'add_factor',
-    'hypothesis': 'Add idiosyncratic volatility factor f_idio_vol_20, computed as rolling 20-day std of residual returns from market model (equal-weight market return), then negated. Low idiosyncratic volatility is known to predict higher returns, offering a signal beyond total volatility.',
-    'change': 'Add f_idio_vol_20 function, compute daily stock returns and equal-weight market return, compute residual return, rolling 20-day std of residuals, negated. Append to FACTORS.',
-    'expected': 'score +0.02–0.05, rank_ic_ir slightly higher. Factor expected to have low correlation with existing ones (<0.85).',
-    'parent_iter': 66,
-    'reasoning': 'After adding max_ret_20 gave +0.04, further factor expansion with a different economic logic (idiosyncratic risk) may continue incremental gains. Idio vol is a distinct anomaly from total vol, momentum, reversal, and shadow factors.',
-    'new_factor': 'f_idio_vol_20',
+    'op_type': 'combine_method',
+    'hypothesis': 'Shorten IC_IR weighting rolling window from 252 to 126 days to better adapt to HORIZON=1, expecting more relevant recent factor performance weights and a slight score increase.',
+    'change': 'In _icir_weights, change window=252 to window=126.',
+    'expected': 'score +0.02–0.05, rank_ic_ir possibly slightly higher.',
+    'parent_iter': 67,
+    'reasoning': 'HORIZON=1 implies rapid signal decay; factor ICs may shift faster. A shorter window captures recent regime changes better, similar to prior successful shift from EWM to rolling 252. 126 is a half-length compromise.',
 }
 
 
@@ -204,7 +203,7 @@ def _icir_weights(factor_panels: list[pd.DataFrame], train_panel: pd.DataFrame) 
     import prepare
     labels = prepare.make_labels(train_panel, HORIZON, kind=LABEL_KIND)
     raw = []
-    window = 252
+    window = 126  # <-- changed from 252
     for f in factor_panels:
         ic = _daily_rank_ic(f, labels)
         if len(ic) < 20:
