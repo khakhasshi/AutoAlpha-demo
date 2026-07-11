@@ -32,11 +32,11 @@ FACTOR_NAME: str = 'demo_v1_h1_mom10_10factors_icir_weight_ranklabel_hl10_ewm60_
 # ITER_NOTE：每次实验必须声明（runner 强制校验）
 ITER_NOTE: dict = {
     'op_type': 'modify_factor',
-    'hypothesis': '将波动率因子窗口从 20 天缩短为 10 天，使其对 HORIZON=1 更敏感，预期提高 rank_ic_ir。',
-    'change': '修改 f_volatility_20，将 rolling 窗口改为 10 天，min_periods=5，函数名改为 f_volatility_10；更新 FACTORS 列表。',
-    'expected': 'score 可能提升 0.02–0.10，rank_ic_ir 略增。',
-    'parent_iter': 58,
-    'reasoning': '之前缩短 HORIZON 和 hl_range 窗口都带来了显著提升，推测其他长窗口因子（如波动率）缩短后也能提供更及时的低波动异象信号，同时与现有因子相关性可接受。',
+    'hypothesis': '将成交量波动率因子窗口从 20 天缩短为 10 天，使其对 HORIZON=1 更敏感，预期提高 rank_ic_ir。',
+    'change': '修改 f_volume_volatility_20，将 rolling 窗口改为 10 天，min_periods=5，函数名改为 f_volume_volatility_10；更新 FACTORS 列表。',
+    'expected': 'score 可能提升 0.02–0.06，rank_ic_ir 略增。',
+    'parent_iter': 59,
+    'reasoning': '之前缩短 volatility 和 hl_range 窗口都带来了显著提升，推测其他长窗口因子（如成交量波动率）缩短后也能提供更及时的信号，同时与现有因子相关性可接受。',
 }
 
 
@@ -160,12 +160,12 @@ def f_volume_reversal_5(panel: pd.DataFrame) -> pd.DataFrame:
     return -ratio
 
 
-def f_volume_volatility_20(panel: pd.DataFrame) -> pd.DataFrame:
-    '''20 日成交量波动率反转（取负）。
+def f_volume_volatility_10(panel: pd.DataFrame) -> pd.DataFrame:
+    '''10 日成交量波动率反转（取负）。
     成交量变化率的滚动标准差高 → 交易量不稳定，短期价格承压；取负后低波动率的股票得分高。'''
     volume = _pivot(panel, 'volume')
     vol_change = volume.pct_change(fill_method=None)
-    return -vol_change.rolling(20, min_periods=10).std()
+    return -vol_change.rolling(10, min_periods=5).std()
 
 
 # 因子注册表：新增因子时，在这里追加函数名即可
@@ -179,7 +179,7 @@ FACTORS = [
     f_rsi_14,
     f_skew_20,
     f_volume_reversal_5,
-    f_volume_volatility_20,
+    f_volume_volatility_10,
 ]
 
 
