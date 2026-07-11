@@ -224,6 +224,33 @@ def normalize_base_url(base_url: str) -> str:
     return base + "/v1/chat/completions"
 
 
+def normalize_models_url(base_url: str) -> str:
+    base = base_url.strip().rstrip("/")
+    if base.endswith("/chat/completions"):
+        base = base.removesuffix("/chat/completions")
+    if base.endswith("/v1"):
+        return base + "/models"
+    return base + "/v1/models"
+
+
+def post_json(url: str, body: dict[str, Any], api_key: str, timeout: int = 240) -> dict[str, Any]:
+    headers = {"Content-Type": "application/json"}
+    if api_key:
+        headers["Authorization"] = f"Bearer {api_key}"
+    req = urllib.request.Request(
+        url,
+        data=json.dumps(body).encode("utf-8"),
+        headers=headers,
+        method="POST",
+    )
+    try:
+        with urllib.request.urlopen(req, timeout=timeout) as resp:
+            return json.loads(resp.read().decode("utf-8"))
+    except urllib.error.HTTPError as exc:
+        detail = exc.read().decode("utf-8", errors="replace")
+        raise RuntimeError(f"API HTTP {exc.code}: {detail}") from exc
+
+
 def call_openai_compatible(cfg: dict[str, Any], messages: list[dict[str, str]]) -> dict[str, Any]:
     if not cfg.get("base_url") or not cfg.get("api_key") or not cfg.get("model"):
         raise RuntimeError("API config is incomplete: base_url, api_key, and model are required.")
@@ -233,26 +260,58 @@ def call_openai_compatible(cfg: dict[str, Any], messages: list[dict[str, str]]) 
         "temperature": cfg.get("temperature", 0.2),
         "response_format": {"type": "json_object"},
     }
-    req = urllib.request.Request(
-        normalize_base_url(cfg["base_url"]),
-        data=json.dumps(body).encode("utf-8"),
-        headers={
-            "Authorization": f"Bearer {cfg['api_key']}",
-            "Content-Type": "application/json",
-        },
-        method="POST",
-    )
+    url = normalize_base_url(cfg["base_url"])
     try:
-        with urllib.request.urlopen(req, timeout=240) as resp:
-            data = json.loads(resp.read().decode("utf-8"))
-    except urllib.error.HTTPError as exc:
-        detail = exc.read().decode("utf-8", errors="replace")
-        raise RuntimeError(f"API HTTP {exc.code}: {detail}") from exc
+        data = post_json(url, body, cfg["api_key"], timeout=240)
+    except RuntimeError as exc:
+        # LM Studio and some compatible servers do not support OpenAI's
+        # json_object mode. The prompt already requests strict JSON, so retry
+        # with plain text instead of blocking local-model use.
+        if "response_format" not in str(exc):
+            raise
+        fallback = dict(body)
+        fallback.pop("response_format", None)
+        data = post_json(url, fallback, cfg["api_key"], timeout=240)
     content = data["choices"][0]["message"]["content"]
     try:
         return json.loads(content)
     except json.JSONDecodeError as exc:
         raise RuntimeError(f"Model did not return JSON. Content starts with: {content[:500]}") from exc
+
+
+def test_api_config(cfg: dict[str, Any]) -> dict[str, Any]:
+    if not cfg.get("base_url") or not cfg.get("model"):
+        raise RuntimeError("base_url and model are required for the connection test.")
+    api_key = cfg.get("api_key") or ""
+    models_req = urllib.request.Request(
+        normalize_models_url(cfg["base_url"]),
+        headers={"Authorization": f"Bearer {api_key}"} if api_key else {},
+        method="GET",
+    )
+    with urllib.request.urlopen(models_req, timeout=10) as resp:
+        models_data = json.loads(resp.read().decode("utf-8"))
+    model_ids = [item.get("id") for item in models_data.get("data", []) if item.get("id")]
+    chat_body = {
+        "model": cfg["model"],
+        "messages": [
+            {"role": "system", "content": "You are testing an OpenAI-compatible local API."},
+            {"role": "user", "content": "Reply with exactly: CONNECTED"},
+        ],
+        "temperature": 0,
+        "max_tokens": 128,
+    }
+    chat_data = post_json(normalize_base_url(cfg["base_url"]), chat_body, api_key, timeout=60)
+    message = chat_data.get("choices", [{}])[0].get("message", {})
+    return {
+        "ok": True,
+        "base_url": cfg["base_url"],
+        "model": cfg["model"],
+        "models": model_ids,
+        "chat_model": chat_data.get("model"),
+        "content": message.get("content"),
+        "reasoning_content": message.get("reasoning_content"),
+        "usage": chat_data.get("usage"),
+    }
 
 
 def maybe_git_commit(cfg: dict[str, Any], rec: dict[str, Any] | None) -> None:
@@ -443,8 +502,11 @@ INDEX_HTML = r"""<!doctype html>
       <label class="row"><input id="auto_commit_accepted" type="checkbox" style="width:auto" /> accepted 后自动 git commit alpha.py</label>
       <div class="row" style="margin-top:14px">
         <button class="primary" onclick="saveConfig()">保存配置</button>
+        <button onclick="fillLmStudio()">填入 LM Studio</button>
+        <button onclick="testConnection()">测试连接</button>
         <button onclick="refreshAll()">刷新</button>
       </div>
+      <pre id="testResult" class="muted" style="margin-top:12px"></pre>
       <hr style="border:0;border-top:1px solid var(--line);margin:18px 0" />
       <h2>人工追加日志</h2>
       <label>日志类型</label>
@@ -490,6 +552,23 @@ INDEX_HTML = r"""<!doctype html>
         auto_commit_accepted:$('auto_commit_accepted').checked
       })});
       await refreshAll();
+    }
+    function fillLmStudio() {
+      $('base_url').value = 'http://127.0.0.1:1234/v1';
+      $('api_key').value = 'lm-studio';
+      if (!$('model').value) $('model').value = 'google/gemma-4-12b-qat';
+    }
+    async function testConnection() {
+      $('testResult').textContent = 'testing...';
+      try {
+        const data = await api('/api/test-api', {method:'POST', body:JSON.stringify({
+          base_url:$('base_url').value, api_key:$('api_key').value, model:$('model').value,
+          temperature:parseFloat($('temperature').value || '0.2')
+        })});
+        $('testResult').textContent = JSON.stringify(data, null, 2);
+      } catch (err) {
+        $('testResult').textContent = String(err);
+      }
     }
     async function startLoop(){ await api('/api/start', {method:'POST', body:'{}'}); await refreshAll(); }
     async function stopLoop(){ await api('/api/stop', {method:'POST', body:'{}'}); await refreshAll(); }
@@ -565,6 +644,18 @@ class Handler(BaseHTTPRequestHandler):
             if self.path.startswith("/api/config"):
                 save_config(data)
                 self._json(load_config(include_secret=False), 200)
+            elif self.path.startswith("/api/test-api"):
+                cfg = {**load_config(), **data}
+                result = test_api_config(cfg)
+                append_log("audit", "api_connection_test", {
+                    "ok": result["ok"],
+                    "base_url": result["base_url"],
+                    "model": result["model"],
+                    "models": result["models"],
+                    "chat_model": result.get("chat_model"),
+                    "usage": result.get("usage"),
+                })
+                self._json(result, 200)
             elif self.path.startswith("/api/start"):
                 start_loop()
                 self._json({"ok": True})

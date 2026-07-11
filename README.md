@@ -69,6 +69,17 @@ AUTOALPHA_SERVICE_PORT=8766 .venv/bin/python service.py
 - `Model`：兼容接口里的模型名
 - `Temperature`：建议从 `0.2` 起
 
+LM Studio 本地模型可直接使用：
+
+```text
+Base URL: http://127.0.0.1:1234/v1
+API Key: lm-studio
+Model:   google/gemma-4-12b-qat
+```
+
+页面里的「填入 LM Studio」会自动填入这些默认值；「测试连接」会同时验证
+`/v1/models` 和 `/v1/chat/completions`，成功时返回 `ok: true` 以及模型回复。
+
 点击「启动持续迭代」后，后台会一直循环：
 
 1. 读取 `program.md`、`evaluation.md` 和当前 `alpha.py`
