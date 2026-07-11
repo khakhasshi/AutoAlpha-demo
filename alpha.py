@@ -31,18 +31,18 @@ import pandas as pd
 # =============================================================================
 # 0. 顶层契约常量（runner 直接读取）
 # =============================================================================
-HORIZON: int = 3                                    # 持有 3 个交易日
+HORIZON: int = 1                                    # 持有 1 个交易日
 LABEL_KIND: str = 'rank'                            # 截面分位作为预测目标
-FACTOR_NAME: str = 'demo_v1_h3_mom10_10factors_icir_weight_ranklabel_hl10_ewm60'
+FACTOR_NAME: str = 'demo_v1_h1_mom10_10factors_icir_weight_ranklabel_hl10_ewm60'
 
 # ITER_NOTE：每次实验必须声明（runner 强制校验）
 ITER_NOTE: dict = {
-    'op_type': 'combine_method',
-    'hypothesis': '使用指数加权移动平均（EWM）计算 IC_IR 权重，使因子组合更侧重近期表现，提升信号时效性。预期能小幅提升 rank_ic_ir 和 score。',
-    'change': '修改 _icir_weights 函数：对每日 rank IC 序列应用 half-life=60 的 EWM，取最后一天均值与标准差计算 IC_IR。',
-    'expected': 'score 可能提升 0.05~0.15，rank_ic_ir 略增。',
-    'parent_iter': 46,
-    'reasoning': '当前已通过缩短因子窗口和改用 rank 标签取得了显著提升，因子库稳定。尝试让组合权重更自适应可能进一步改善信号。',
+    'op_type': 'horizon',
+    'hypothesis': '将 HORIZON 从 3 改为 1，进一步缩短持有期，使信号与短期因子窗口更匹配，预期提升 rank_ic_ir 和 score。',
+    'change': '修改 HORIZON 常量为 1，更新 FACTOR_NAME 和 ITER_NOTE，其余不变。',
+    'expected': 'score 可能提升 0.05~0.2，rank_ic_ir 略增。',
+    'parent_iter': 47,
+    'reasoning': '当前因子库包含多个短期因子，HORIZON=3 已经取得较好效果，进一步缩短至 1 可能提升信号时效性。',
 }
 
 
