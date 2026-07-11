@@ -178,6 +178,45 @@ def last_run_record() -> dict[str, Any] | None:
         return None
 
 
+def score_series() -> list[dict[str, Any]]:
+    path = ROOT / "journal" / "runs.jsonl"
+    if not path.exists():
+        return []
+    rows = []
+    best = float("-inf")
+    for line in path.read_text(encoding="utf-8").splitlines():
+        if not line.strip():
+            continue
+        try:
+            rec = json.loads(line)
+        except Exception:
+            continue
+        score = rec.get("score")
+        if isinstance(score, int | float):
+            best = max(best, float(score))
+            best_score = best
+        else:
+            best_score = None if best == float("-inf") else best
+        rows.append({
+            "iter_id": rec.get("iter_id"),
+            "ts": rec.get("ts"),
+            "score": score,
+            "best_score": best_score,
+            "decision": rec.get("decision"),
+            "status": rec.get("status"),
+            "horizon": rec.get("horizon"),
+            "label_kind": rec.get("label_kind"),
+            "rank_ic_ir": rec.get("rank_ic_ir"),
+            "rank_ic_mean": rec.get("rank_ic_mean"),
+            "pearson_ic_mean": rec.get("pearson_ic_mean"),
+            "sharpe": rec.get("sharpe"),
+            "annual_return": rec.get("annual_return"),
+            "max_drawdown": rec.get("max_drawdown"),
+            "score_anomaly": rec.get("score_anomaly"),
+        })
+    return rows
+
+
 def build_prompt() -> list[dict[str, str]]:
     program = read_text("program.md")
     evaluation = read_text("evaluation.md")
@@ -329,7 +368,7 @@ def maybe_git_commit(cfg: dict[str, Any], rec: dict[str, Any] | None) -> None:
     run_cmd(["git", "commit", "-m", f"AutoAlpha iteration {run_id}: score {score:.4f}"], timeout=120)
 
 
-def one_iteration() -> None:
+def one_iteration() -> bool:
     cfg = load_config()
     with STATE_LOCK:
         RUNTIME["iteration"] += 1
@@ -369,6 +408,17 @@ def one_iteration() -> None:
         "runner_tail": output[-4000:],
         "run_record": rec,
     })
+    if rec and rec.get("score_anomaly"):
+        append_log("audit", "paused_for_score_anomaly", {
+            "iteration": iteration,
+            "score": rec.get("score"),
+            "decision": rec.get("decision"),
+            "score_anomaly": rec.get("score_anomaly"),
+        })
+        with STATE_LOCK:
+            RUNTIME["status"] = "waiting_for_human_score_anomaly"
+            RUNTIME["last_finished_at"] = now_iso()
+        return False
     maybe_git_commit(cfg, rec)
     with STATE_LOCK:
         RUNTIME["status"] = "sleeping"
@@ -379,6 +429,7 @@ def one_iteration() -> None:
         "decision": rec.get("decision") if rec else None,
         "score": rec.get("score") if rec else None,
     })
+    return True
 
 
 def loop_main() -> None:
@@ -394,7 +445,9 @@ def loop_main() -> None:
             time.sleep(2)
             continue
         try:
-            one_iteration()
+            should_continue = one_iteration()
+            if not should_continue:
+                break
         except Exception as exc:
             err = f"{type(exc).__name__}: {exc}"
             append_log("audit", "iteration_error", {
@@ -411,9 +464,11 @@ def loop_main() -> None:
                     break
             time.sleep(1)
     with STATE_LOCK:
+        final_status = RUNTIME["status"]
         RUNTIME["running"] = False
         RUNTIME["stop_requested"] = False
-        RUNTIME["status"] = "idle"
+        if final_status not in {"waiting_for_human_score_anomaly"}:
+            RUNTIME["status"] = "idle"
     append_log("audit", "loop_stopped", {})
 
 
@@ -448,7 +503,7 @@ INDEX_HTML = r"""<!doctype html>
     body { margin:0; font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif; background:var(--bg); color:var(--ink); }
     header { padding:18px 24px; border-bottom:1px solid var(--line); background:#fff; display:flex; justify-content:space-between; gap:16px; align-items:center; }
     h1 { margin:0; font-size:20px; }
-    main { padding:20px 24px; display:grid; grid-template-columns:360px 1fr; gap:20px; }
+    main { padding:20px 24px; display:grid; grid-template-columns:360px 1fr; gap:20px; align-items:start; }
     section { background:var(--panel); border:1px solid var(--line); border-radius:8px; padding:16px; }
     label { display:block; font-size:12px; color:var(--muted); margin:12px 0 6px; }
     input, select, textarea { width:100%; border:1px solid var(--line); border-radius:6px; padding:9px 10px; font:inherit; background:#fff; }
@@ -465,6 +520,15 @@ INDEX_HTML = r"""<!doctype html>
     .log { height:620px; overflow:auto; background:#0b1020; color:#dbeafe; border-radius:8px; padding:14px; }
     .muted { color:var(--muted); }
     .grid2 { display:grid; grid-template-columns:1fr 1fr; gap:10px; }
+    .right { display:grid; gap:20px; }
+    .chartHead { display:flex; justify-content:space-between; gap:12px; align-items:flex-start; margin-bottom:10px; }
+    .metricRow { display:flex; gap:8px; flex-wrap:wrap; }
+    .metric { border:1px solid var(--line); border-radius:6px; padding:8px 10px; min-width:116px; background:#fafafa; }
+    .metric b { display:block; font-size:17px; }
+    .metric span { color:var(--muted); font-size:11px; }
+    #scoreChart { width:100%; height:280px; border:1px solid var(--line); border-radius:8px; background:#fbfcfe; display:block; }
+    .legend { display:flex; gap:14px; flex-wrap:wrap; font-size:12px; color:var(--muted); margin-top:8px; }
+    .dot { width:9px; height:9px; border-radius:50%; display:inline-block; margin-right:5px; }
     @media (max-width: 900px) { main { grid-template-columns:1fr; } .log { height:480px; } }
   </style>
 </head>
@@ -516,15 +580,38 @@ INDEX_HTML = r"""<!doctype html>
       <button onclick="appendManualLog()">追加日志</button>
       <p class="muted">后台循环不会自己停止；只有点击停止或进程退出才会停。</p>
     </section>
-    <section>
-      <div class="tabs">
-        <button id="tab_audit" class="active" onclick="setLog('audit')">审计日志</button>
-        <button id="tab_action" onclick="setLog('action')">行动日志</button>
-        <button id="tab_research" onclick="setLog('research')">研究日志</button>
-        <button id="tab_delivery" onclick="setLog('delivery')">交付日志</button>
-      </div>
-      <div class="log"><pre id="logView"></pre></div>
-    </section>
+    <div class="right">
+      <section>
+        <div class="chartHead">
+          <div>
+            <h2 style="margin:0 0 4px">Score 实时曲线</h2>
+            <div class="status" id="chartSubtitle">等待迭代数据</div>
+          </div>
+          <div class="metricRow">
+            <div class="metric"><span>latest</span><b id="latestScore">--</b></div>
+            <div class="metric"><span>best</span><b id="bestScore">--</b></div>
+            <div class="metric"><span>iterations</span><b id="iterCount">0</b></div>
+          </div>
+        </div>
+        <svg id="scoreChart" viewBox="0 0 900 280" role="img" aria-label="score by iteration"></svg>
+        <div class="legend">
+          <span><i class="dot" style="background:#087443"></i>ACCEPTED</span>
+          <span><i class="dot" style="background:#b54708"></i>REJECTED</span>
+          <span><i class="dot" style="background:#b42318"></i>CRASH/ERROR</span>
+          <span><i class="dot" style="background:#1d4ed8"></i>best score</span>
+          <span><i class="dot" style="background:#7c3aed"></i>score anomaly</span>
+        </div>
+      </section>
+      <section>
+        <div class="tabs">
+          <button id="tab_audit" class="active" onclick="setLog('audit')">审计日志</button>
+          <button id="tab_action" onclick="setLog('action')">行动日志</button>
+          <button id="tab_research" onclick="setLog('research')">研究日志</button>
+          <button id="tab_delivery" onclick="setLog('delivery')">交付日志</button>
+        </div>
+        <div class="log"><pre id="logView"></pre></div>
+      </section>
+    </div>
   </main>
   <script>
     let currentLog = 'audit';
@@ -581,14 +668,86 @@ INDEX_HTML = r"""<!doctype html>
       const rows = await api('/api/logs?kind=' + encodeURIComponent(currentLog) + '&limit=200');
       $('logView').textContent = rows.map(r => JSON.stringify(r, null, 2)).join('\n\n');
     }
+    function fmt(v, digits=4) {
+      return Number.isFinite(v) ? v.toFixed(digits) : '--';
+    }
+    function colorFor(row) {
+      if (row.score_anomaly) return '#7c3aed';
+      if (row.decision === 'ACCEPTED') return '#087443';
+      if (row.decision === 'REJECTED') return '#b54708';
+      return '#b42318';
+    }
+    function drawScoreChart(rows) {
+      const svg = $('scoreChart');
+      const w = 900, h = 280, m = {l:58, r:22, t:22, b:42};
+      svg.innerHTML = '';
+      if (!rows.length) {
+        svg.innerHTML = '<text x="450" y="140" text-anchor="middle" fill="#667085" font-size="14">暂无迭代数据</text>';
+        $('latestScore').textContent = '--';
+        $('bestScore').textContent = '--';
+        $('iterCount').textContent = '0';
+        $('chartSubtitle').textContent = 'runner.py once 后会自动出现曲线';
+        return;
+      }
+      const valid = rows.filter(r => Number.isFinite(Number(r.score)));
+      const latest = rows[rows.length - 1];
+      const best = valid.reduce((acc, r) => Math.max(acc, Number(r.score)), -Infinity);
+      $('latestScore').textContent = fmt(Number(latest.score));
+      $('bestScore').textContent = fmt(best);
+      $('iterCount').textContent = String(rows.length);
+      $('chartSubtitle').textContent = `latest: #${latest.iter_id} ${latest.decision || latest.status || ''} · horizon=${latest.horizon ?? '--'} · sharpe=${fmt(Number(latest.sharpe), 3)}`;
+      const xs = rows.map(r => Number(r.iter_id)).filter(Number.isFinite);
+      const ys = valid.flatMap(r => [Number(r.score), Number(r.best_score)]).filter(Number.isFinite);
+      const minX = Math.min(...xs), maxX = Math.max(...xs);
+      let minY = Math.min(...ys), maxY = Math.max(...ys);
+      if (minY === maxY) { minY -= 1; maxY += 1; }
+      const padY = (maxY - minY) * 0.12 || 1;
+      minY -= padY; maxY += padY;
+      const x = v => m.l + (maxX === minX ? 0.5 : (v - minX) / (maxX - minX)) * (w - m.l - m.r);
+      const y = v => h - m.b - (v - minY) / (maxY - minY) * (h - m.t - m.b);
+      const el = (name, attrs, text) => {
+        const node = document.createElementNS('http://www.w3.org/2000/svg', name);
+        for (const [k, v] of Object.entries(attrs)) node.setAttribute(k, v);
+        if (text !== undefined) node.textContent = text;
+        svg.appendChild(node);
+        return node;
+      };
+      el('rect', {x:0, y:0, width:w, height:h, fill:'#fbfcfe'});
+      for (let i = 0; i <= 4; i++) {
+        const value = minY + (maxY - minY) * i / 4;
+        const yy = y(value);
+        el('line', {x1:m.l, y1:yy, x2:w-m.r, y2:yy, stroke:'#e5e7eb', 'stroke-width':1});
+        el('text', {x:m.l-10, y:yy+4, 'text-anchor':'end', fill:'#667085', 'font-size':11}, fmt(value, 2));
+      }
+      el('line', {x1:m.l, y1:h-m.b, x2:w-m.r, y2:h-m.b, stroke:'#98a2b3', 'stroke-width':1});
+      el('line', {x1:m.l, y1:m.t, x2:m.l, y2:h-m.b, stroke:'#98a2b3', 'stroke-width':1});
+      const scorePts = valid.map(r => `${x(Number(r.iter_id))},${y(Number(r.score))}`).join(' ');
+      if (scorePts) el('polyline', {points:scorePts, fill:'none', stroke:'#111827', 'stroke-width':2.2, 'stroke-linejoin':'round', 'stroke-linecap':'round'});
+      const bestPts = valid.map(r => `${x(Number(r.iter_id))},${y(Number(r.best_score))}`).join(' ');
+      if (bestPts) el('polyline', {points:bestPts, fill:'none', stroke:'#1d4ed8', 'stroke-width':2, 'stroke-dasharray':'6 4'});
+      rows.forEach(row => {
+        const score = Number(row.score);
+        if (!Number.isFinite(score)) return;
+        const cx = x(Number(row.iter_id)), cy = y(score);
+        const c = el('circle', {cx, cy, r: row.score_anomaly ? 6 : 5, fill:colorFor(row), stroke:'#fff', 'stroke-width':1.5});
+        const title = document.createElementNS('http://www.w3.org/2000/svg', 'title');
+        title.textContent = `#${row.iter_id} ${row.decision || row.status}\nscore ${fmt(score)}\nbest ${fmt(Number(row.best_score))}\nrank_ic_ir ${fmt(Number(row.rank_ic_ir), 3)}\nsharpe ${fmt(Number(row.sharpe), 3)}`;
+        c.appendChild(title);
+        el('text', {x:cx, y:h-18, 'text-anchor':'middle', fill:'#667085', 'font-size':10}, row.iter_id);
+      });
+    }
+    async function refreshScores() {
+      const rows = await api('/api/scores');
+      drawScoreChart(rows);
+    }
     async function appendManualLog() {
       await api('/api/logs', {method:'POST', body:JSON.stringify({kind:$('manual_kind').value, text:$('manual_text').value})});
       $('manual_text').value = '';
       await refreshLog();
     }
-    async function refreshAll(){ await Promise.all([refreshStatus(), refreshConfig(), refreshLog()]); }
+    async function refreshAll(){ await Promise.all([refreshStatus(), refreshConfig(), refreshLog(), refreshScores()]); }
     refreshAll();
-    setInterval(() => { refreshStatus(); refreshLog(); }, 3000);
+    setInterval(() => { refreshStatus(); refreshLog(); refreshScores(); }, 3000);
   </script>
 </body>
 </html>"""
@@ -599,6 +758,7 @@ class Handler(BaseHTTPRequestHandler):
         raw = json.dumps(data, ensure_ascii=False, default=str).encode("utf-8")
         self.send_response(status)
         self.send_header("Content-Type", "application/json; charset=utf-8")
+        self.send_header("Cache-Control", "no-store")
         self.send_header("Content-Length", str(len(raw)))
         self.end_headers()
         self.wfile.write(raw)
@@ -615,6 +775,7 @@ class Handler(BaseHTTPRequestHandler):
                 raw = INDEX_HTML.encode("utf-8")
                 self.send_response(200)
                 self.send_header("Content-Type", "text/html; charset=utf-8")
+                self.send_header("Cache-Control", "no-store")
                 self.send_header("Content-Length", str(len(raw)))
                 self.end_headers()
                 self.wfile.write(raw)
@@ -624,6 +785,8 @@ class Handler(BaseHTTPRequestHandler):
                 self._json({"runtime": runtime})
             elif self.path.startswith("/api/config"):
                 self._json(load_config(include_secret=False))
+            elif self.path.startswith("/api/scores"):
+                self._json(score_series())
             elif self.path.startswith("/api/logs"):
                 query = self.path.split("?", 1)[1] if "?" in self.path else ""
                 params = dict(part.split("=", 1) for part in query.split("&") if "=" in part)
