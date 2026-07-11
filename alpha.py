@@ -33,16 +33,16 @@ import pandas as pd
 # =============================================================================
 HORIZON: int = 1                                    # 持有 1 个交易日
 LABEL_KIND: str = 'rank'                            # 截面分位作为预测目标
-FACTOR_NAME: str = 'demo_v1_h1_mom10_10factors_icir_weight_ranklabel_hl10_ewm60'
+FACTOR_NAME: str = 'demo_v1_h1_mom10_10factors_icir_weight_ranklabel_hl10_ewm60_roll252'
 
 # ITER_NOTE：每次实验必须声明（runner 强制校验）
 ITER_NOTE: dict = {
-    'op_type': 'horizon',
-    'hypothesis': '将 HORIZON 从 3 改为 1，进一步缩短持有期，使信号与短期因子窗口更匹配，预期提升 rank_ic_ir 和 score。',
-    'change': '修改 HORIZON 常量为 1，更新 FACTOR_NAME 和 ITER_NOTE，其余不变。',
-    'expected': 'score 可能提升 0.05~0.2，rank_ic_ir 略增。',
-    'parent_iter': 47,
-    'reasoning': '当前因子库包含多个短期因子，HORIZON=3 已经取得较好效果，进一步缩短至 1 可能提升信号时效性。',
+    'op_type': 'combine_method',
+    'hypothesis': '将 IC_IR 权重估计从 EWM(60) 改为滚动窗口(252)，预期权重更稳定、提升 rank_ic_ir。',
+    'change': '修改 _icir_weights 函数，使用 252 天滚动窗口计算 IC 均值与标准差替代指数加权。',
+    'expected': 'score 可能提升 0.02~0.10，rank_ic_ir 略增。',
+    'parent_iter': 48,
+    'reasoning': 'EWM 对近期噪声敏感，滚动窗口能平滑长期预测能力，避免过拟合近期信号。',
 }
 
 
@@ -190,7 +190,7 @@ FACTORS = [
 
 
 # =============================================================================
-# 3. 因子组合 · IC_IR 加权（指数衰减版）
+# 3. 因子组合 · IC_IR 加权（滚动窗口版）
 # =============================================================================
 def _align_factors(factor_panels: list[pd.DataFrame]) -> tuple[list[pd.DataFrame], pd.Index, pd.Index]:
     '''把多个因子面板对齐到共同的日期与股票列。'''
@@ -230,21 +230,21 @@ def _daily_rank_ic(signal: pd.DataFrame, labels: pd.DataFrame) -> pd.Series:
 
 
 def _icir_weights(factor_panels: list[pd.DataFrame], train_panel: pd.DataFrame) -> np.ndarray:
-    '''用 train 段标签估计各因子的 signed IC_IR 权重（指数衰减 EWM）。
-    half-life=60 个交易日，更侧重近期因子表现。'''
+    '''用 train 段标签估计各因子的 signed IC_IR 权重（滚动窗口版）。
+    使用 252 日滚动窗口计算 IC 的均值与标准差，替代 EWM。'''
     import prepare
 
     labels = prepare.make_labels(train_panel, HORIZON, kind=LABEL_KIND)
     raw = []
-    halflife = 60
+    window = 252
     for f in factor_panels:
         ic = _daily_rank_ic(f, labels)
         if len(ic) < 20:
             raw.append(0.0)
             continue
-        # 使用指数加权的最后一天均值与标准差计算 IC_IR
-        wm = ic.ewm(halflife=halflife, min_periods=20).mean().iloc[-1]
-        ws = ic.ewm(halflife=halflife, min_periods=20).std().iloc[-1]
+        # 滚动窗口计算 IC 均值和标准差
+        wm = ic.rolling(window=window, min_periods=20).mean().iloc[-1]
+        ws = ic.rolling(window=window, min_periods=20).std().iloc[-1]
         if np.isnan(wm) or np.isnan(ws) or ws == 0:
             raw.append(0.0)
         else:
