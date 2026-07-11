@@ -33,20 +33,20 @@ import pandas as pd
 # =============================================================================
 HORIZON: int = 5                                    # 持有 5 个交易日
 LABEL_KIND: str = "market_neutral"                  # 扣除截面等权市场收益
-FACTOR_NAME: str = "demo_v1_8factors_icir_weight"
+FACTOR_NAME: str = "demo_v1_9factors_icir_weight"
 
 # ITER_NOTE：每次实验必须声明（runner 强制校验）
 ITER_NOTE: dict = {
     "op_type":     "add_factor",
-    "hypothesis":  "新增 20 日收益偏度反转因子，捕捉极端负偏度后的短期反转，"
-                   "与现有均值和标准差因子相关性低，应能增加信号多样性并提升 IC 稳定性。",
-    "change":      "在 FACTORS 末尾追加 f_skew_20；其余不变。",
-    "expected":    "score +0.15 ~ +0.30 左右，rank_ic_ir 与 rank_ic_mean 有望小幅提升。",
-    "parent_iter": 17,
-    "reasoning":   "当前 best (run 17) score 4.61，7 因子 IC_IR 加权已稳定；"
-                   "偏度因子是价格分布的三阶矩，与波动率（二阶矩）和均值（一阶）正交，"
-                   "加入后应提升因子的覆盖维度而不触发高相关性门控（ρ 预计 <0.4）。",
-    "new_factor":  "f_skew_20",
+    "hypothesis":  "新增 5 日成交量反转因子，捕捉放量后的短期反转效应，"
+                   "与现有量价因子相关性低，应能补充信息并提升 IC 稳定性。",
+    "change":      "在 FACTORS 末尾追加 f_volume_reversal_5；其余不变。",
+    "expected":    "score +0.05 ~ +0.15 左右，rank_ic_ir 有望小幅提升。",
+    "parent_iter": 20,
+    "reasoning":   "当前 best (run 20) score 4.65，8 因子 IC_IR 加权已稳定；"
+                   "成交量反转是常见的短期反转因子，与现有因子（多为价格衍生）相关性低，"
+                   "加入后有望提升因子多样性且不触发高相关性门控（ρ 预计 <0.5）。",
+    "new_factor":  "f_volume_reversal_5",
 }
 
 
@@ -83,7 +83,7 @@ def _pivot(panel: pd.DataFrame, col: str) -> pd.DataFrame:
 
 
 # =============================================================================
-# 2. 因子库 · 8 个量价因子
+# 2. 因子库 · 9 个量价因子
 # =============================================================================
 def f_reversal_5(panel: pd.DataFrame) -> pd.DataFrame:
     """5 日短期反转：A 股小盘股反转效应显著。
@@ -161,6 +161,15 @@ def f_skew_20(panel: pd.DataFrame) -> pd.DataFrame:
     return -skew
 
 
+def f_volume_reversal_5(panel: pd.DataFrame) -> pd.DataFrame:
+    """5 日成交量反转（取负）。
+    成交量 / 5 日均量 高 → 放量，短期容易出现价格反转；取负让低成交量的股票得分高。"""
+    volume = _pivot(panel, "volume")
+    mean_vol_5 = volume.rolling(5, min_periods=3).mean()
+    ratio = volume / mean_vol_5.replace(0, np.nan)
+    return -ratio
+
+
 # 因子注册表：新增因子时，在这里追加函数名即可
 FACTORS = [
     f_reversal_5,
@@ -171,6 +180,7 @@ FACTORS = [
     f_gap_reversal_5,
     f_rsi_14,
     f_skew_20,
+    f_volume_reversal_5,
 ]
 
 
