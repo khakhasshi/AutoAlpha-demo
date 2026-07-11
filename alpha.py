@@ -33,18 +33,20 @@ import pandas as pd
 # =============================================================================
 HORIZON: int = 5                                    # 持有 5 个交易日
 LABEL_KIND: str = "market_neutral"                  # 扣除截面等权市场收益
-FACTOR_NAME: str = "demo_v1_6factors_icir_weight"
+FACTOR_NAME: str = "demo_v1_7factors_icir_weight"
 
 # ITER_NOTE：每次实验必须声明（runner 强制校验）
 ITER_NOTE: dict = {
-    "op_type":     "combine_method",
-    "hypothesis":  "当前 6 个因子预测强度不一致，等权会稀释强因子；用 train 段 IC_IR "
-                   "做 signed 权重，应提升验证段 IC 稳定性。",
-    "change":      "组合方法从等权改为 train 段 rank IC_IR 加权；因子集合、HORIZON、LABEL_KIND 不变。",
-    "expected":    "score 相对 run #1 小幅提升；若 train/val 风格切换明显则可能回落。",
-    "parent_iter": 1,
-    "reasoning":   "IC_IR 同时衡量因子方向和稳定性，负权重允许反向使用训练期稳定反向的因子。"
-                   "权重仅由 train 标签估计，val 段只做预测，保持三段切分语义。",
+    "op_type":     "add_factor",
+    "hypothesis":  "新增 RSI-14 反转因子，捕捉中期超买超卖信号，与现有 5 日反转窗口不同，"
+                   "应能补充信息并提升 IC 稳定性。",
+    "change":      "在 FACTORS 末尾追加 f_rsi_14；其余不变。",
+    "expected":    "score +0.15 ~ +0.25 左右，rank_ic_ir 与 rank_ic_mean 有望小幅提升。",
+    "parent_iter": 3,
+    "reasoning":   "当前 best (run 3) score 4.61，6 因子 IC_IR 加权已稳定；"
+                   "RSI 是经典反转度量，与现有 reversal_5 窗口不同，相关性中等，"
+                   "加入后应增加信号多样性而不触发门控。",
+    "new_factor":  "f_rsi_14",
 }
 
 
@@ -81,7 +83,7 @@ def _pivot(panel: pd.DataFrame, col: str) -> pd.DataFrame:
 
 
 # =============================================================================
-# 2. 因子库 · 5 个经典量价因子
+# 2. 因子库 · 7 个量价因子
 # =============================================================================
 def f_reversal_5(panel: pd.DataFrame) -> pd.DataFrame:
     """5 日短期反转：A 股小盘股反转效应显著。
@@ -135,6 +137,21 @@ def f_gap_reversal_5(panel: pd.DataFrame) -> pd.DataFrame:
     return -gap.rolling(5, min_periods=3).mean()
 
 
+def f_rsi_14(panel: pd.DataFrame) -> pd.DataFrame:
+    """14 日 RSI 反转因子（取负）。
+    RSI 高（>70）=超买，未来倾向于回落；RSI 低（<30）=超卖，未来倾向于反弹。
+    取负后使得预测上涨的股票（即低 RSI）因子值高。"""
+    close = _pivot(panel, "close")
+    delta = close.diff()
+    up = delta.clip(lower=0)
+    down = -delta.clip(upper=0)
+    avg_up = up.rolling(14, min_periods=10).mean()
+    avg_down = down.rolling(14, min_periods=10).mean()
+    rs = avg_up / avg_down.replace(0, np.nan)
+    rsi = 100.0 - 100.0 / (1.0 + rs)
+    return -rsi
+
+
 # 因子注册表：新增因子时，在这里追加函数名即可
 FACTORS = [
     f_reversal_5,
@@ -143,11 +160,12 @@ FACTORS = [
     f_amihud_20,
     f_hl_range_20,
     f_gap_reversal_5,
+    f_rsi_14,
 ]
 
 
 # =============================================================================
-# 3. 因子组合 · 线性等权
+# 3. 因子组合 · IC_IR 加权
 # =============================================================================
 def _align_factors(factor_panels: list[pd.DataFrame]) -> tuple[list[pd.DataFrame], pd.Index, pd.Index]:
     """把多个因子面板对齐到共同的日期与股票列。"""
