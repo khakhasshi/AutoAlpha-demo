@@ -31,23 +31,18 @@ import pandas as pd
 # =============================================================================
 # 0. 顶层契约常量（runner 直接读取）
 # =============================================================================
-HORIZON: int = 5                                    # 持有 5 个交易日
+HORIZON: int = 3                                    # 持有 3 个交易日
 LABEL_KIND: str = 'market_neutral'                  # 扣除截面等权市场收益
-FACTOR_NAME: str = 'demo_v1_10factors_icir_weight'
+FACTOR_NAME: str = 'demo_v1_h3_10factors_icir_weight'
 
 # ITER_NOTE：每次实验必须声明（runner 强制校验）
 ITER_NOTE: dict = {
-    'op_type':     'modify_factor',
-    'hypothesis':  '将反转因子的窗口从5日缩短为3日，捕捉更短期的反转效应；'
-                   'A股短期反转效应通常更强，3日窗口可能提升信号纯度。',
-    'change':      '将 f_reversal_5 替换为 f_reversal_3（计算3日收益率取负）；FACTORS 列表同步更新。',
-    'expected':    'score +0.03 ~ +0.08；rank_ic_ir 可能小幅提升。',
-    'parent_iter': 29,
-    'reasoning':   '当前 best (run 29) score 4.8318，反转因子窗口5日可能偏长；'
-                   '3日反转在A股中有效性更强，且与其他因子（动量20、波动率等）相关性较低，'
-                   '改动仅影响单因子，风险可控。',
-    'old_factor':  'f_reversal_5',
-    'new_factor':  'f_reversal_3',
+    'op_type': 'horizon',
+    'hypothesis': '将 HORIZON 从 5 缩短为 3，预期更短的持有期能更好地捕捉短期反转信号，因为因子信号衰减较快，3 天可能更精确。',
+    'change': 'HORIZON 从 5 改为 3；FACTOR_NAME 更新以反映变化。',
+    'expected': 'score 可能提升 0.05 ~ 0.15，若 IC 稳定性改善。rank_ic_ir 可能增加。',
+    'parent_iter': 39,
+    'reasoning': '当前因子库多为短期窗口（3、5、14、20），HORIZON=3 或能减少信号衰减带来的噪声。仅改 HORIZON，风险可控。'
 }
 
 
