@@ -33,16 +33,16 @@ import pandas as pd
 # =============================================================================
 HORIZON: int = 3                                    # 持有 3 个交易日
 LABEL_KIND: str = 'market_neutral'                  # 扣除截面等权市场收益
-FACTOR_NAME: str = 'demo_v1_h3_10factors_icir_weight'
+FACTOR_NAME: str = 'demo_v1_h3_mom10_10factors_icir_weight'
 
 # ITER_NOTE：每次实验必须声明（runner 强制校验）
 ITER_NOTE: dict = {
-    'op_type': 'horizon',
-    'hypothesis': '将 HORIZON 从 5 缩短为 3，预期更短的持有期能更好地捕捉短期反转信号，因为因子信号衰减较快，3 天可能更精确。',
-    'change': 'HORIZON 从 5 改为 3；FACTOR_NAME 更新以反映变化。',
-    'expected': 'score 可能提升 0.05 ~ 0.15，若 IC 稳定性改善。rank_ic_ir 可能增加。',
-    'parent_iter': 39,
-    'reasoning': '当前因子库多为短期窗口（3、5、14、20），HORIZON=3 或能减少信号衰减带来的噪声。仅改 HORIZON，风险可控。'
+    'op_type': 'modify_factor',
+    'hypothesis': '将动量因子窗口从20日缩短为10日。在HORIZON=3的短期持有下，10日动量可能比20日动量提供更及时的动量信号，减少信号滞后。',
+    'change': 'f_momentum_20 改为 f_momentum_10；FACTOR_NAME 更新。',
+    'expected': 'score 可能提升 +0.03 ~ +0.08。rank_ic_ir 可能因动量因子与短期持有更匹配而小幅改善。',
+    'parent_iter': 43,
+    'reasoning': '当前 HORIZON=3，20日动量窗口相对较长，可能包含过多与3日持有无关的价格变化，缩短窗口可增强信号时效性。',
 }
 
 
@@ -88,11 +88,11 @@ def f_reversal_3(panel: pd.DataFrame) -> pd.DataFrame:
     return -close.pct_change(3, fill_method=None)
 
 
-def f_momentum_20(panel: pd.DataFrame) -> pd.DataFrame:
-    '''20 日中期动量：中期动量效应。
-    过去 20 日涨得多的股票，未来也倾向于继续涨。'''
+def f_momentum_10(panel: pd.DataFrame) -> pd.DataFrame:
+    '''10 日中期动量：中期动量效应。
+    过去 10 日涨得多的股票，未来也倾向于继续涨。'''
     close = _pivot(panel, 'close')
-    return close.pct_change(20, fill_method=None)
+    return close.pct_change(10, fill_method=None)
 
 
 def f_volatility_20(panel: pd.DataFrame) -> pd.DataFrame:
@@ -177,7 +177,7 @@ def f_volume_volatility_20(panel: pd.DataFrame) -> pd.DataFrame:
 # 因子注册表：新增因子时，在这里追加函数名即可
 FACTORS = [
     f_reversal_3,
-    f_momentum_20,
+    f_momentum_10,
     f_volatility_20,
     f_amihud_20,
     f_hl_range_20,
