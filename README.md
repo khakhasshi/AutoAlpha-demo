@@ -42,6 +42,53 @@ cat journal/notes/0001.md       # 看第一轮的实验卡
 ls factor_library/              # 看归档卡
 ```
 
+## 持续在线研究服务
+
+启动本地 Web 服务：
+
+```bash
+.venv/bin/python service.py
+```
+
+然后打开：
+
+```text
+http://127.0.0.1:8765
+```
+
+如果端口被占用，可以换端口：
+
+```bash
+AUTOALPHA_SERVICE_PORT=8766 .venv/bin/python service.py
+```
+
+页面里可以填写 OpenAI-compatible API：
+
+- `Base URL`：例如 `https://api.example.com/v1`
+- `API Key`：你的兼容 API key
+- `Model`：兼容接口里的模型名
+- `Temperature`：建议从 `0.2` 起
+
+点击「启动持续迭代」后，后台会一直循环：
+
+1. 读取 `program.md`、`evaluation.md` 和当前 `alpha.py`
+2. 调用兼容 API 生成下一版完整 `alpha.py`
+3. 执行 `runner.py once`
+4. 写入日志并进入下一轮
+
+只有点击「停止」或结束 `service.py` 进程才会停。服务状态和运行日志保存在：
+
+```text
+service_state/
+└── logs/
+    ├── audit.jsonl      审计日志：配置、启动、停止、异常、循环状态
+    ├── action.jsonl     行动日志：文件替换、命令执行、输出尾部
+    ├── research.jsonl   研究日志：上下文构建、模型提案、研究说明
+    └── delivery.jsonl   交付日志：每轮 runner 结果、score、decision、指标
+```
+
+这些运行状态文件默认不进入 git。页面也支持给四类日志追加人工备注。
+
 ### 4. 重置（如果想重跑）
 ```bash
 python runner.py reset

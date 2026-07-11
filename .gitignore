@@ -11,3 +11,4 @@ cache/*.pkl
 # AutoAlpha experiment outputs
 journal/
 factor_library/
+service_state/
