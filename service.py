@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import html
 import json
+import math
 import os
 import subprocess
 import threading
@@ -129,6 +130,18 @@ def read_log(kind: str, limit: int = 200) -> list[dict[str, Any]]:
         except Exception:
             out.append({"ts": "", "kind": kind, "event": "parse_error", "payload": {"raw": line}})
     return out
+
+
+def json_safe(value: Any) -> Any:
+    if isinstance(value, float) and not math.isfinite(value):
+        if math.isnan(value):
+            return "NaN"
+        return "Infinity" if value > 0 else "-Infinity"
+    if isinstance(value, dict):
+        return {k: json_safe(v) for k, v in value.items()}
+    if isinstance(value, list):
+        return [json_safe(v) for v in value]
+    return value
 
 
 def run_cmd(args: list[str], timeout: int = 900) -> tuple[int, str]:
@@ -521,7 +534,22 @@ INDEX_HTML = r"""<!doctype html>
     .tabs { display:flex; gap:8px; margin-bottom:12px; }
     .tabs button.active { background:#111827; color:#fff; border-color:#111827; }
     pre { margin:0; white-space:pre-wrap; word-break:break-word; font-size:12px; line-height:1.45; }
-    .log { height:620px; overflow:auto; background:#0b1020; color:#dbeafe; border-radius:8px; padding:14px; }
+    .logCards { height:620px; overflow:auto; border:1px solid var(--line); border-radius:8px; padding:12px; background:#f8fafc; display:grid; align-content:start; gap:10px; }
+    .logToolbar { display:flex; justify-content:space-between; gap:10px; align-items:center; margin-bottom:10px; flex-wrap:wrap; }
+    .logCard { background:#fff; border:1px solid var(--line); border-left:5px solid #94a3b8; border-radius:8px; padding:11px 12px; display:grid; gap:8px; }
+    .logCard.ok { border-left-color:#087443; }
+    .logCard.warn { border-left-color:#b54708; }
+    .logCard.bad { border-left-color:#b42318; }
+    .logCard.info { border-left-color:#1d4ed8; }
+    .logTop { display:flex; justify-content:space-between; gap:10px; align-items:flex-start; }
+    .logTitle { font-weight:700; line-height:1.3; }
+    .logTime { color:var(--muted); font-size:11px; white-space:nowrap; }
+    .logSummary { color:#344054; font-size:13px; line-height:1.45; }
+    .chips { display:flex; gap:6px; flex-wrap:wrap; }
+    .chip { border:1px solid var(--line); border-radius:999px; padding:3px 7px; background:#f8fafc; color:#475467; font-size:11px; }
+    .logCard details { border-top:1px solid #eef2f7; padding-top:7px; }
+    .logCard summary { cursor:pointer; color:var(--muted); font-size:12px; }
+    .logCard pre { margin-top:8px; max-height:260px; overflow:auto; background:#0b1020; color:#dbeafe; border-radius:6px; padding:10px; }
     .muted { color:var(--muted); }
     .grid2 { display:grid; grid-template-columns:1fr 1fr; gap:10px; }
     .right { display:grid; gap:20px; }
@@ -643,17 +671,21 @@ INDEX_HTML = r"""<!doctype html>
       </section>
       <section>
         <div class="tabs">
-          <button id="tab_audit" class="active" onclick="setLog('audit')">审计日志</button>
+          <button id="tab_audit" onclick="setLog('audit')">审计日志</button>
           <button id="tab_action" onclick="setLog('action')">行动日志</button>
           <button id="tab_research" onclick="setLog('research')">研究日志</button>
-          <button id="tab_delivery" onclick="setLog('delivery')">交付日志</button>
+          <button id="tab_delivery" class="active" onclick="setLog('delivery')">交付日志</button>
         </div>
-        <div class="log"><pre id="logView"></pre></div>
+        <div class="logToolbar">
+          <div class="status" id="logHint">卡片展示最近日志</div>
+          <label class="row" style="margin:0"><input id="showHttpLogs" type="checkbox" style="width:auto" onchange="refreshLog()" /> 显示 HTTP 轮询</label>
+        </div>
+        <div class="logCards" id="logView"></div>
       </section>
     </div>
   </main>
   <script>
-    let currentLog = 'audit';
+    let currentLog = 'delivery';
     async function api(path, options={}) {
       const res = await fetch(path, {headers:{'Content-Type':'application/json'}, ...options});
       if (!res.ok) throw new Error(await res.text());
@@ -750,7 +782,120 @@ INDEX_HTML = r"""<!doctype html>
     }
     async function refreshLog() {
       const rows = await api('/api/logs?kind=' + encodeURIComponent(currentLog) + '&limit=200');
-      $('logView').textContent = rows.map(r => JSON.stringify(r, null, 2)).join('\n\n');
+      renderLogCards(rows);
+    }
+    function shortText(text, max=260) {
+      const s = String(text ?? '').replace(/\s+/g, ' ').trim();
+      return s.length > max ? s.slice(0, max - 1) + '…' : s;
+    }
+    function pct(v) {
+      return Number.isFinite(Number(v)) ? (Number(v) * 100).toFixed(2) + '%' : '--';
+    }
+    function logCardClass(rec) {
+      const p = rec.payload || {};
+      const run = p.run_record || {};
+      if (rec.event?.includes('error') || run.status === 'crash' || run.decision === 'REVERTED' || p.returncode > 0) return 'bad';
+      if (run.decision === 'REJECTED' || rec.event?.includes('paused') || rec.event?.includes('stop')) return 'warn';
+      if (run.decision === 'ACCEPTED' || rec.event?.includes('saved') || rec.event?.includes('test')) return 'ok';
+      return 'info';
+    }
+    function logSummary(rec) {
+      const p = rec.payload || {};
+      const run = p.run_record || {};
+      if (rec.kind === 'delivery' && run.iter_id) {
+        const decision = run.decision || run.status;
+        return {
+          title: `Run #${String(run.iter_id).padStart(4, '0')} · ${decision}`,
+          summary: run.error ? shortText(run.error, 300) : `score ${fmt(Number(run.score))}, rank_ic_ir ${fmt(Number(run.rank_ic_ir), 3)}, sharpe ${fmt(Number(run.sharpe), 3)}`,
+          chips: [`service iter ${p.iteration}`, `score ${fmt(Number(run.score))}`, `turnover ${fmt(Number(run.annual_turnover), 1)}`, `ret ${pct(run.annual_return)}`],
+        };
+      }
+      if (rec.kind === 'research' && rec.event === 'proposal_received') {
+        return {
+          title: `研究提案 · service iter ${p.iteration}`,
+          summary: shortText(p.summary || p.research_note || '模型返回候选 alpha.py', 320),
+          chips: [`alpha ${p.alpha_chars || 0} chars`, rec.event],
+        };
+      }
+      if (rec.kind === 'research' && rec.event === 'context_built') {
+        return { title: `上下文已构建 · service iter ${p.iteration}`, summary: `已收集 program、evaluation、当前 alpha 与 runner status。`, chips: [`messages ${p.message_count}`] };
+      }
+      if (rec.kind === 'action' && rec.event === 'command_finished') {
+        const args = Array.isArray(p.args) ? p.args.slice(-2).join(' ') : 'command';
+        const tail = p.output_tail || '';
+        const match = tail.match(/\[(ACCEPTED|REJECTED|CRASH)\][^\n]*/);
+        return {
+          title: `命令完成 · ${args}`,
+          summary: match ? match[0] : shortText(tail, 260),
+          chips: [`rc ${p.returncode}`, `${fmt(Number(p.elapsed_sec), 2)}s`],
+        };
+      }
+      if (rec.kind === 'action' && rec.event === 'command_started') {
+        const args = Array.isArray(p.args) ? p.args.slice(-2).join(' ') : 'command';
+        return { title: `命令开始 · ${args}`, summary: `后台已开始执行命令。`, chips: [rec.event] };
+      }
+      if (rec.kind === 'action' && rec.event === 'alpha_replaced') {
+        return { title: `alpha.py 已替换`, summary: `已备份旧版本并写入模型候选。`, chips: [`service iter ${p.iteration}`, 'backup saved'] };
+      }
+      if (rec.kind === 'audit' && rec.event === 'api_connection_test') {
+        return { title: `API 连接测试成功`, summary: `模型 ${p.chat_model || p.model} 已响应；可用模型 ${Array.isArray(p.models) ? p.models.length : 0} 个。`, chips: [p.base_url, p.model] };
+      }
+      if (rec.kind === 'audit' && rec.event === 'config_saved') {
+        return { title: `配置已保存`, summary: `模型 ${p.model || '--'}，API ${p.base_url || '--'}。`, chips: [p.has_api_key ? 'has key' : 'no key', `sleep ${p.iteration_sleep_sec}s`] };
+      }
+      if (rec.kind === 'audit' && rec.event === 'http') {
+        return { title: `HTTP 请求`, summary: p.message || '', chips: [p.client || 'local'] };
+      }
+      if (rec.kind === 'audit' && rec.event === 'paused_for_score_anomaly') {
+        return { title: `因 score anomaly 暂停`, summary: p.score_anomaly?.message || 'score 与底层指标背离，等待人工复核。', chips: [`score ${fmt(Number(p.score))}`, p.decision || '--'] };
+      }
+      return {
+        title: rec.event || rec.kind,
+        summary: shortText(JSON.stringify(p, null, 2), 320),
+        chips: [rec.kind],
+      };
+    }
+    function appendText(parent, tag, className, text) {
+      const el = document.createElement(tag);
+      if (className) el.className = className;
+      el.textContent = text;
+      parent.appendChild(el);
+      return el;
+    }
+    function renderLogCards(rows) {
+      const showHttp = $('showHttpLogs')?.checked;
+      const filtered = rows.filter(r => showHttp || r.event !== 'http').slice(-80).reverse();
+      const view = $('logView');
+      view.innerHTML = '';
+      $('logHint').textContent = `${currentLog} · ${filtered.length} cards${showHttp ? '' : ' · HTTP 轮询已隐藏'}`;
+      if (!filtered.length) {
+        appendText(view, 'div', 'status', '暂无可展示日志。');
+        return;
+      }
+      filtered.forEach(rec => {
+        const meta = logSummary(rec);
+        const card = document.createElement('article');
+        card.className = `logCard ${logCardClass(rec)}`;
+        const top = document.createElement('div');
+        top.className = 'logTop';
+        appendText(top, 'div', 'logTitle', meta.title);
+        appendText(top, 'div', 'logTime', rec.ts || '');
+        card.appendChild(top);
+        appendText(card, 'div', 'logSummary', meta.summary);
+        const chips = document.createElement('div');
+        chips.className = 'chips';
+        (meta.chips || []).filter(Boolean).slice(0, 6).forEach(c => appendText(chips, 'span', 'chip', c));
+        card.appendChild(chips);
+        const details = document.createElement('details');
+        const summary = document.createElement('summary');
+        summary.textContent = '原始详情';
+        const pre = document.createElement('pre');
+        pre.textContent = JSON.stringify(rec, null, 2);
+        details.appendChild(summary);
+        details.appendChild(pre);
+        card.appendChild(details);
+        view.appendChild(card);
+      });
     }
     function fmt(v, digits=4) {
       return Number.isFinite(v) ? v.toFixed(digits) : '--';
@@ -839,7 +984,7 @@ INDEX_HTML = r"""<!doctype html>
 
 class Handler(BaseHTTPRequestHandler):
     def _json(self, data: Any, status: int = 200) -> None:
-        raw = json.dumps(data, ensure_ascii=False, default=str).encode("utf-8")
+        raw = json.dumps(json_safe(data), ensure_ascii=False, default=str, allow_nan=False).encode("utf-8")
         self.send_response(status)
         self.send_header("Content-Type", "application/json; charset=utf-8")
         self.send_header("Cache-Control", "no-store")
