@@ -33,20 +33,20 @@ import pandas as pd
 # =============================================================================
 HORIZON: int = 5                                    # 持有 5 个交易日
 LABEL_KIND: str = "market_neutral"                  # 扣除截面等权市场收益
-FACTOR_NAME: str = "demo_v1_7factors_icir_weight"
+FACTOR_NAME: str = "demo_v1_8factors_icir_weight"
 
 # ITER_NOTE：每次实验必须声明（runner 强制校验）
 ITER_NOTE: dict = {
     "op_type":     "add_factor",
-    "hypothesis":  "新增 RSI-14 反转因子，捕捉中期超买超卖信号，与现有 5 日反转窗口不同，"
-                   "应能补充信息并提升 IC 稳定性。",
-    "change":      "在 FACTORS 末尾追加 f_rsi_14；其余不变。",
-    "expected":    "score +0.15 ~ +0.25 左右，rank_ic_ir 与 rank_ic_mean 有望小幅提升。",
-    "parent_iter": 3,
-    "reasoning":   "当前 best (run 3) score 4.61，6 因子 IC_IR 加权已稳定；"
-                   "RSI 是经典反转度量，与现有 reversal_5 窗口不同，相关性中等，"
-                   "加入后应增加信号多样性而不触发门控。",
-    "new_factor":  "f_rsi_14",
+    "hypothesis":  "新增 20 日收益偏度反转因子，捕捉极端负偏度后的短期反转，"
+                   "与现有均值和标准差因子相关性低，应能增加信号多样性并提升 IC 稳定性。",
+    "change":      "在 FACTORS 末尾追加 f_skew_20；其余不变。",
+    "expected":    "score +0.15 ~ +0.30 左右，rank_ic_ir 与 rank_ic_mean 有望小幅提升。",
+    "parent_iter": 17,
+    "reasoning":   "当前 best (run 17) score 4.61，7 因子 IC_IR 加权已稳定；"
+                   "偏度因子是价格分布的三阶矩，与波动率（二阶矩）和均值（一阶）正交，"
+                   "加入后应提升因子的覆盖维度而不触发高相关性门控（ρ 预计 <0.4）。",
+    "new_factor":  "f_skew_20",
 }
 
 
@@ -83,7 +83,7 @@ def _pivot(panel: pd.DataFrame, col: str) -> pd.DataFrame:
 
 
 # =============================================================================
-# 2. 因子库 · 7 个量价因子
+# 2. 因子库 · 8 个量价因子
 # =============================================================================
 def f_reversal_5(panel: pd.DataFrame) -> pd.DataFrame:
     """5 日短期反转：A 股小盘股反转效应显著。
@@ -152,6 +152,15 @@ def f_rsi_14(panel: pd.DataFrame) -> pd.DataFrame:
     return -rsi
 
 
+def f_skew_20(panel: pd.DataFrame) -> pd.DataFrame:
+    """20 日收益偏度反转（取负）。
+    负偏度（极端下跌）之后短期倾向于反转；理论基于投资者过度反应。"""
+    close = _pivot(panel, "close")
+    ret = close.pct_change(fill_method=None)
+    skew = ret.rolling(20, min_periods=10).skew()
+    return -skew
+
+
 # 因子注册表：新增因子时，在这里追加函数名即可
 FACTORS = [
     f_reversal_5,
@@ -161,6 +170,7 @@ FACTORS = [
     f_hl_range_20,
     f_gap_reversal_5,
     f_rsi_14,
+    f_skew_20,
 ]
 
 
