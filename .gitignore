@@ -1,6 +1,7 @@
 __pycache__/
 *.py[cod]
 .DS_Store
+.venv/
 
 # Large/local generated assets
 stock_data/
@@ -9,3 +10,4 @@ cache/*.pkl
 
 # AutoAlpha experiment outputs
 journal/
+factor_library/

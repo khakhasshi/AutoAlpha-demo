@@ -37,14 +37,15 @@ FACTOR_NAME: str = "demo_v1_baseline_5factors_equal_weight"
 
 # ITER_NOTE：每次实验必须声明（runner 强制校验）
 ITER_NOTE: dict = {
-    "op_type":     "other",
-    "hypothesis":  "教学版起点：5 个经典量价因子 + 截面 winsorize+zscore + 等权组合。"
-                   "作为学员的最小可运行 baseline。",
-    "change":      "初始版本。",
-    "expected":    "score > 0（教学版公式：1.0*rank_ic_ir + 10.0*pearson_ic_mean + 10.0*rank_ic_mean）。",
+    "op_type":     "add_factor",
+    "hypothesis":  "隔夜跳空包含开盘情绪冲击，短期容易均值回归；与已有日内振幅、波动率、"
+                   "流动性因子应有互补信息。",
+    "change":      "新增 f_gap_reversal_5，并追加到 FACTORS；组合方法仍保持等权。",
+    "expected":    "rank IC 稳定性小幅提升，score 较 baseline 略有改善。",
     "parent_iter": 0,
-    "reasoning":   "选择 5 个物理独立、行业公认的经典因子作为起点，方便学员理解。"
-                   "等权组合最简单，也最容易讲清楚。",
+    "reasoning":   "A 股小盘股开盘跳空常带有情绪和流动性冲击，取负号表达跳空后反转。"
+                   "使用 5 日均值降低单日噪声，保持 O(N*T) 的简单结构。",
+    "new_factor":  "f_gap_reversal_5",
 }
 
 
@@ -126,6 +127,15 @@ def f_hl_range_20(panel: pd.DataFrame) -> pd.DataFrame:
     return -rng.rolling(20, min_periods=10).mean()
 
 
+def f_gap_reversal_5(panel: pd.DataFrame) -> pd.DataFrame:
+    """5 日隔夜跳空反转。
+    gap = open / prev_close - 1；取负号表示高开过多后短期更可能回落。"""
+    open_ = _pivot(panel, "open")
+    close = _pivot(panel, "close")
+    gap = open_ / close.shift(1).replace(0, np.nan) - 1.0
+    return -gap.rolling(5, min_periods=3).mean()
+
+
 # 因子注册表：新增因子时，在这里追加函数名即可
 FACTORS = [
     f_reversal_5,
@@ -133,6 +143,7 @@ FACTORS = [
     f_volatility_20,
     f_amihud_20,
     f_hl_range_20,
+    f_gap_reversal_5,
 ]
 
 
