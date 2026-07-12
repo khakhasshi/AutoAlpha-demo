@@ -11,11 +11,11 @@ FACTOR_NAME: str = 'demo_v1_h20_rank_composite_icir_decay'
 
 ITER_NOTE: dict = {
     'op_type': 'combine_method',
-    'hypothesis': '将指数衰减半衰期从63缩短至21，给予近期因子IC表现更高权重，以适应快速变化的市场风格，期望小幅提升score。',
-    'change': "修改 _icir_weights 函数的 decay_halflife 默认参数为21。",
-    'expected': 'score提升0.01~0.04。',
-    'parent_iter': 139,
-    'reasoning': '当前半衰期63(~1季度)可能仍不能及时反映因子表现变化；进一步缩短至21(~1个月)可能更快捕捉IC动量，在trade_v2高换手惩罚下仍可能提升整体质量。'
+    'hypothesis': '将指数衰减半衰期从21微调至15，探索更优的近期权重以平衡IC动量捕捉和稳定性，期望小幅提升score。',
+    'change': "修改 _icir_weights 函数的 decay_halflife 默认参数为15。",
+    'expected': 'score提升0.01~0.03，或持平。',
+    'parent_iter': 141,
+    'reasoning': '当前半衰期21(~1个月)已取得良好效果，但15介于21与10之间，可能提供更佳的IC动量响应速度，同时保持足够的稳定性。'
 }
 
 
@@ -229,7 +229,7 @@ def _weighted_mad(values: np.ndarray, weights: np.ndarray, median: float) -> flo
     return _weighted_median(absdev, weights)
 
 
-def _icir_weights(factor_panels: list[pd.DataFrame], train_panel: pd.DataFrame, decay_halflife: int = 21) -> np.ndarray:
+def _icir_weights(factor_panels: list[pd.DataFrame], train_panel: pd.DataFrame, decay_halflife: int = 15) -> np.ndarray:
     import prepare
     labels = prepare.make_labels(train_panel, HORIZON, kind=LABEL_KIND)
 
