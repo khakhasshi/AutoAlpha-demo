@@ -4,18 +4,17 @@ import numpy as np
 import pandas as pd
 
 
-HORIZON: int = 5
+HORIZON: int = 10
 LABEL_KIND: str = 'rank'
-FACTOR_NAME: str = 'demo_v1_h5_idiovol10_13factors_no_momentum10_rev1_icir_roll126_maxret10'
+FACTOR_NAME: str = 'demo_v1_h10_idiovol10_13factors_no_momentum10_rev1_icir_roll126_maxret10'
 
 ITER_NOTE: dict = {
-    'op_type': 'add_factor',
-    'hypothesis': '添加20日动量因子，当前因子库以反转类为主，缺少中长期动量因子；在H=5持有期下，20日动量可能捕获趋势延续效应，与现有反转因子互补，预期提高信号多元性。',
-    'change': '在FACTORS列表末尾添加f_momentum_20，实现为close.pct_change(20)；其他保持不变。',
-    'expected': 'score可能提升0.05~0.2，因为增加了新信息源；注意因子相关性检测。',
-    'parent_iter': 115,
-    'reasoning': 'best #115使用H=5且IC_IR加权，但因子库缺乏正向动量，添加20日动量可丰富信号维度。',
-    'new_factor': 'f_momentum_20'
+    'op_type': 'horizon',
+    'hypothesis': '改变持有期从5天到10天，进一步降低换手率，预期提升夏普、减少回撤，从而在trade_v2评分中提高。',
+    'change': '将HORIZON从5改为10，其他保持不变。',
+    'expected': '换手率显著下降，回撤改善，IC可能微降，总体score预计+0.1~+0.3。',
+    'parent_iter': 116,
+    'reasoning': '当前best #116 H=5 score 2.36，延长至10天可降低换手惩罚、提高回撤质量，符合trade_v2偏好。'
 }
 
 
