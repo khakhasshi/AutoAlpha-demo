@@ -187,8 +187,11 @@ def _correlation_gate(alpha_mod, train_panel, iter_id: int) -> dict[str, Any]:
     if len(factors) < 2:
         return {}
 
-    # 计算所有因子 + L1 标准化（与 alpha._compute_factors 一致逻辑）
-    cs = getattr(alpha_mod, "cs_winsorize_zscore")
+    # 计算所有因子 + 截面标准化。早期 best 使用 cs_rank_zscore，后续版本可能
+    # 使用 cs_winsorize_zscore；门控只关心相对相关性，二者都可作为规范化入口。
+    cs = getattr(alpha_mod, "cs_winsorize_zscore", None) or getattr(alpha_mod, "cs_rank_zscore", None)
+    if cs is None:
+        raise AttributeError("alpha.py must define cs_winsorize_zscore or cs_rank_zscore for correlation gate")
     panels = {fn.__name__: cs(fn(train_panel)) for fn in factors}
 
     corr_mat = prepare.compute_factor_correlation_matrix(panels)
@@ -293,11 +296,11 @@ def _write_note(iter_id: int, note: dict[str, Any], rec: dict[str, Any]) -> Path
             f"excess_sharpe = {rec.get('excess_sharpe', float('nan')):+.3f}, "
             f"excess_mdd = {rec.get('excess_max_drawdown', float('nan')):+.2%}",
         ]
-        # v2 分量分解（如果有）
+        # 主分分量分解（如果有）
         bd = rec.get("score_breakdown")
         if bd and isinstance(bd, dict) and "weighted" in bd:
             lines.append("")
-            lines.append("### v2 分量分解（weighted contribution）")
+            lines.append(f"### {rec.get('score_version', 'score')} 分量分解（weighted contribution）")
             for k, v in bd["weighted"].items():
                 lines.append(f"- {k}: {v:+.4f}")
     if rec.get("error"):
@@ -401,7 +404,7 @@ def evaluate_once(iter_id: int) -> tuple[dict[str, Any], dict[str, Any]]:
             "max_drawdown": rpt.max_drawdown,
             "annual_turnover": rpt.annual_turnover,
             "n_days": rpt.n_days,
-            # 超额（vs 中证 1000；trade_v2 会进入 score）
+            # 超额（vs 中证 1000；当前 score_version 会进入 score）
             "excess_annual_return": getattr(rpt, "excess_annual_return", float("nan")),
             "excess_sharpe":         getattr(rpt, "excess_sharpe", float("nan")),
             "excess_max_drawdown":   getattr(rpt, "excess_max_drawdown", float("nan")),

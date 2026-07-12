@@ -10,12 +10,12 @@ LABEL_KIND: str = 'rank'
 FACTOR_NAME: str = 'demo_v1_h20_rank_composite_icir_decay'
 
 ITER_NOTE: dict = {
-    'op_type': 'combine_method',
-    'hypothesis': '将指数衰减半衰期从21微调至15，探索更优的近期权重以平衡IC动量捕捉和稳定性，期望小幅提升score。',
-    'change': "修改 _icir_weights 函数的 decay_halflife 默认参数为15。",
-    'expected': 'score提升0.01~0.03，或持平。',
-    'parent_iter': 141,
-    'reasoning': '当前半衰期21(~1个月)已取得良好效果，但15介于21与10之间，可能提供更佳的IC动量响应速度，同时保持足够的稳定性。'
+    'op_type': 'other',
+    'hypothesis': '在不改变因子逻辑的前提下，将当前best作为trade_v3新评价体系的承接基准。',
+    'change': '补充cs_winsorize_zscore兼容入口；保持HORIZON、LABEL_KIND、因子列表和组合逻辑不变。',
+    'expected': '建立trade_v3 baseline，后续迭代继续从当前best进度出发。',
+    'parent_iter': 147,
+    'reasoning': '当前研究已在trade_v2下收敛。先用当前best在trade_v3下重估，保留历史记录，同时为下一阶段低相关因子和低换手研究建立可比基线。'
 }
 
 
@@ -24,6 +24,11 @@ def cs_rank_zscore(f: pd.DataFrame) -> pd.DataFrame:
     pct = f.rank(axis=1, pct=True, method='average').clip(1e-10, 1 - 1e-10)
     z = pd.DataFrame(norm.ppf(pct.values), index=pct.index, columns=pct.columns)
     return z
+
+
+def cs_winsorize_zscore(f: pd.DataFrame) -> pd.DataFrame:
+    """Compatibility normalizer for runner correlation gates."""
+    return cs_rank_zscore(f)
 
 
 def _pivot(panel: pd.DataFrame, col: str) -> pd.DataFrame:

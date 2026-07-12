@@ -543,6 +543,7 @@ Rules:
 - Keep the public contract: HORIZON, LABEL_KIND, ITER_NOTE, FACTORS, run(train_panel, val_panel).
 - Use only train data to estimate any fitted parameters. Validation is for runner evaluation only.
 - Prefer a single clear hypothesis likely to improve prepare.primary_score, unless the latest logs suggest a score anomaly.
+- The current phase is post-convergence: prefer low-correlation new factors, orthogonalization, lower turnover, or return/drawdown-efficiency improvements over small IC decay/window tweaks.
 {memory_block}
 
 Current runner status:
