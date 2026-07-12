@@ -11,11 +11,11 @@ FACTOR_NAME: str = 'demo_v1_h20_rank_composite_icir_decay'
 
 ITER_NOTE: dict = {
     'op_type': 'other',
-    'hypothesis': '在不改变因子逻辑的前提下，将当前最高分best作为trade_v4新奖励机制的承接基准。',
-    'change': '补充cs_winsorize_zscore兼容入口；保持HORIZON、LABEL_KIND、因子列表和组合逻辑不变。',
-    'expected': '建立trade_v4 baseline，后续迭代继续从当前最高分进度出发。',
-    'parent_iter': 156,
-    'reasoning': '当前研究在trade_v3下继续收敛，最高分来自#0156。先用该best在trade_v4下重估，保留历史记录，同时为复杂度、同质化和年度稳定性奖励建立新基线。'
+    'hypothesis': '在ICIR加权组合信号后添加指数加权移动平均平滑(span=3)，降低日间噪声和换手，预期提高收益/回撤效率和年度稳定性，减少换手惩罚。',
+    'change': '在run()中，将combine_icir_weight的输出通过.ewm(span=3, min_periods=1, adjust=False)平滑，然后再进行最终截面rank。',
+    'expected': 'score可能提升0.2-0.5，因为换手惩罚降低、效率提升；IC可能微跌。',
+    'parent_iter': 166,
+    'reasoning': '当前best score 5.49，年换手可能偏高；轻量平滑是低风险改造，符合Phase 2低换手研究方向。'
 }
 
 
@@ -334,7 +334,11 @@ def run(train_panel: pd.DataFrame, val_panel: pd.DataFrame) -> tuple[pd.DataFram
     weights = _icir_weights(fps_train, train_panel)
     sig_train_raw = combine_icir_weight(fps_train, weights)
     sig_val_raw = combine_icir_weight(fps_val, weights)
-    return _finalize(sig_train_raw), _finalize(sig_val_raw)
+    # Apply time-series EWM smoothing to reduce turnover
+    # Smooth each stock's signal over time to dampen day-to-day noise
+    sig_train_smooth = sig_train_raw.ewm(span=3, min_periods=1, adjust=False).mean()
+    sig_val_smooth = sig_val_raw.ewm(span=3, min_periods=1, adjust=False).mean()
+    return _finalize(sig_train_smooth), _finalize(sig_val_smooth)
 
 
 if __name__ == '__main__':
