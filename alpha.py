@@ -4,17 +4,17 @@ import numpy as np
 import pandas as pd
 
 
-HORIZON: int = 10
+HORIZON: int = 20
 LABEL_KIND: str = 'rank'
-FACTOR_NAME: str = 'demo_v1_h10_idiovol10_13factors_no_momentum10_rev1_icir_roll126_maxret10'
+FACTOR_NAME: str = 'demo_v1_h20_idiovol10_13factors_no_momentum10_rev1_icir_roll126_maxret10'
 
 ITER_NOTE: dict = {
     'op_type': 'horizon',
-    'hypothesis': '改变持有期从5天到10天，进一步降低换手率，预期提升夏普、减少回撤，从而在trade_v2评分中提高。',
-    'change': '将HORIZON从5改为10，其他保持不变。',
-    'expected': '换手率显著下降，回撤改善，IC可能微降，总体score预计+0.1~+0.3。',
-    'parent_iter': 116,
-    'reasoning': '当前best #116 H=5 score 2.36，延长至10天可降低换手惩罚、提高回撤质量，符合trade_v2偏好。'
+    'hypothesis': '将HORIZON从10改为20，进一步延长持有期，预期大幅降低换手率、改善回撤和夏普，提升trade_v2评分。',
+    'change': 'HORIZON从10改为20，更新FACTOR_NAME标识，其他保持不变。',
+    'expected': '换手率进一步下降，回撤质量提高，IC可能微降，总体score预计+0.1~+0.3。',
+    'parent_iter': 117,
+    'reasoning': '当前最佳#117 H=10，score 3.765，H=5时score 2.36，趋势表明更长持有期有利于交易质量。尝试H=20探索极限。'
 }
 
 
