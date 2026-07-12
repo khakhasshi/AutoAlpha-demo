@@ -9,13 +9,12 @@ LABEL_KIND: str = 'rank'
 FACTOR_NAME: str = 'demo_v1_h1_idiovol10_13factors_no_momentum10_rev1_icir_roll126_maxret10'
 
 ITER_NOTE: dict = {
-    'op_type': 'add_factor',
-    'hypothesis': 'Add f_price_range_position_10 factor to capture short-term mean-reversion from price position within 10-day high-low range. Expected to have low correlation with existing factors and improve rank_ic_ir.',
-    'change': 'Added f_price_range_position_10 factor function and appended to FACTORS list. No other changes.',
-    'expected': 'score improvement of +0.01-0.03 due to additional independent reversal signal.',
-    'parent_iter': 100,
-    'reasoning': 'Existing factors cover various reversal patterns, but a bounded range position measure (relative to recent high-low) has not been included. It captures a distinct aspect of mean-reversion with a natural 0-1 scale, likely low correlation with other oscillators.',
-    'new_factor': 'f_price_range_position_10',
+    'op_type': 'combine_method',
+    'hypothesis': '简化组合权重，用正 IC 均值直接成比例替代协方差逆求解，可能降低小样本协方差估计噪声，提升信号稳健性。',
+    'change': '修改 _icir_weights 内部权重计算，改为 weights = positive(mean_ic) / sum(positive(mean_ic))，若全部均值非正则回退等权。',
+    'expected': 'score 可能略有提升（约 +0.02~+0.1），因为避免了矩阵求逆的不稳定；也可能下降，若协方差信息有用。',
+    'parent_iter': 105,
+    'reasoning': '当前 ICIR 加权依赖协方差逆估计，样本有限时可能引入噪声。简单均值加权更稳健，且在因子相关性不高时接近最优。',
 }
 
 
@@ -209,7 +208,6 @@ def _icir_weights(factor_panels: list[pd.DataFrame], train_panel: pd.DataFrame) 
     import prepare
     labels = prepare.make_labels(train_panel, HORIZON, kind=LABEL_KIND)
 
-    # Compute daily rank IC for each factor
     ic_list = []
     for f in factor_panels:
         ic = _daily_rank_ic(f, labels)
@@ -218,7 +216,6 @@ def _icir_weights(factor_panels: list[pd.DataFrame], train_panel: pd.DataFrame) 
         else:
             ic_list.append(ic)
 
-    # Align on common dates
     common_dates = None
     for ic in ic_list:
         if not ic.empty:
@@ -228,41 +225,28 @@ def _icir_weights(factor_panels: list[pd.DataFrame], train_panel: pd.DataFrame) 
                 common_dates = common_dates.intersection(ic.index)
 
     if common_dates is None or len(common_dates) < 20:
-        # fallback to equal weight
         return np.ones(len(factor_panels)) / len(factor_panels)
 
-    # Build IC matrix [T, K]
     ic_matrix = pd.DataFrame({i: ic.reindex(common_dates) for i, ic in enumerate(ic_list)})
-    ic_matrix = ic_matrix.dropna(axis=1, how='all')  # drop factors with no valid IC
+    ic_matrix = ic_matrix.dropna(axis=1, how='all')
     if ic_matrix.shape[1] == 0:
         return np.ones(len(factor_panels)) / len(factor_panels)
 
-    # Keep only factors with positive mean IC (threshold 1e-5)
+    # Mean IC per factor
     mu_full = ic_matrix.mean(axis=0)
-    positive_mask = mu_full > 1e-5
-    if not positive_mask.any():
+    positive = mu_full > 0
+    if not positive.any():
         return np.ones(len(factor_panels)) / len(factor_panels)
 
-    ic_pos = ic_matrix.loc[:, positive_mask]
-    mu = ic_pos.mean(axis=0).values  # shape (K_pos,)
-    Sigma = np.cov(ic_pos.values, rowvar=False)  # shape (K_pos, K_pos)
-    lam = 1e-3
-    Sigma_reg = Sigma + lam * np.eye(Sigma.shape[0])
-
-    try:
-        w_raw = np.linalg.solve(Sigma_reg, mu)
-    except np.linalg.LinAlgError:
-        # fallback to equal weight
+    # Simple proportion of positive mean IC
+    raw_w = np.maximum(mu_full, 0.0)  # keep original index for mapping
+    sum_w = raw_w.sum()
+    if sum_w <= 0:
         return np.ones(len(factor_panels)) / len(factor_panels)
-
-    # Normalize to sum to 1 (weights can be negative, but we expect positive due to positive mu)
-    w = w_raw / np.sum(w_raw)
-
-    # Map back to full factor list, zero weight for excluded factors
+    weights = raw_w / sum_w
+    # Ensure output length matches factor list
     full_weights = np.zeros(len(factor_panels))
-    pos_indices = np.where(positive_mask)[0]
-    full_weights[pos_indices] = w
-
+    full_weights[:len(weights)] = weights.values
     return full_weights
 
 
