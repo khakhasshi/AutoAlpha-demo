@@ -10,11 +10,11 @@ FACTOR_NAME: str = 'demo_v1_h20_rank_composite_icir_decay'
 
 ITER_NOTE: dict = {
     'op_type': 'combine_method',
-    'hypothesis': '使用指数衰减加权的复合IC_IR（半衰期126天），使近期IC表现好的因子获得更高权重，以适应当前市场结构，期望小幅提升score。',
-    'change': '修改_icir_weights函数，引入时间衰减权重；衰减半衰期126个交易日。',
-    'expected': 'score提升0.02~0.08，因ICIR更注重近期表现。',
-    'parent_iter': 124,
-    'reasoning': '当前best使用等权历史IC_IR，可能无法及时反映因子近期有效性变化，引入衰减有望改善权重动态。'
+    'hypothesis': '使用加权中位数和MAD估计IC_IR以替代均值和标准差，提高权重对极值的稳健性，期望小幅提升score。',
+    'change': '修改_icir_weights函数，改用加权中位数和MAD计算IR。',
+    'expected': 'score提升0.01~0.05，因IR估计更稳定。',
+    'parent_iter': 129,
+    'reasoning': 'IC序列可能存在极值，均值和标准差受此影响，改用中位数和MAD可改善因子权重分配。'
 }
 
 
@@ -218,6 +218,21 @@ def _daily_pearson_ic(signal: pd.DataFrame, labels: pd.DataFrame) -> pd.Series:
     return sig.corrwith(lab, axis=1).dropna()
 
 
+def _weighted_median(values: np.ndarray, weights: np.ndarray) -> float:
+    order = np.argsort(values)
+    sv = values[order]
+    sw = weights[order]
+    cum = np.cumsum(sw)
+    cut = 0.5 * cum[-1]
+    idx = np.searchsorted(cum, cut)
+    return sv[idx]
+
+
+def _weighted_mad(values: np.ndarray, weights: np.ndarray, median: float) -> float:
+    absdev = np.abs(values - median)
+    return _weighted_median(absdev, weights)
+
+
 def _icir_weights(factor_panels: list[pd.DataFrame], train_panel: pd.DataFrame, decay_halflife: int = 126) -> np.ndarray:
     import prepare
     labels = prepare.make_labels(train_panel, HORIZON, kind=LABEL_KIND)
@@ -257,13 +272,12 @@ def _icir_weights(factor_panels: list[pd.DataFrame], train_panel: pd.DataFrame, 
             if len(common) < 20:
                 ir_rank.append(0.0)
             else:
-                w = decay_weights.loc[common]
+                w = decay_weights.loc[common].values
                 ic_vals = ic_r.loc[common].values
-                w = w.values
-                mu = np.average(ic_vals, weights=w)
-                # Weighted std: sqrt(average((x - mu)^2, weights=w))
-                std = np.sqrt(np.average((ic_vals - mu) ** 2, weights=w))
-                ir = mu / (std + 1e-8)
+                med = _weighted_median(ic_vals, w)
+                mad = _weighted_mad(ic_vals, w, med)
+                sigma = mad * 1.4826
+                ir = med / (sigma + 1e-8)
                 ir_rank.append(ir)
         # pearson IC
         if ic_p.empty or len(ic_p) < 20:
@@ -273,12 +287,12 @@ def _icir_weights(factor_panels: list[pd.DataFrame], train_panel: pd.DataFrame, 
             if len(common) < 20:
                 ir_pearson.append(0.0)
             else:
-                w = decay_weights.loc[common]
+                w = decay_weights.loc[common].values
                 ic_vals = ic_p.loc[common].values
-                w = w.values
-                mu = np.average(ic_vals, weights=w)
-                std = np.sqrt(np.average((ic_vals - mu) ** 2, weights=w))
-                ir = mu / (std + 1e-8)
+                med = _weighted_median(ic_vals, w)
+                mad = _weighted_mad(ic_vals, w, med)
+                sigma = mad * 1.4826
+                ir = med / (sigma + 1e-8)
                 ir_pearson.append(ir)
 
     composite_ir = np.array(ir_rank) + 0.5 * np.array(ir_pearson)
