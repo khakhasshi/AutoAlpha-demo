@@ -6,15 +6,15 @@ import pandas as pd
 
 HORIZON: int = 1
 LABEL_KIND: str = 'rank'
-FACTOR_NAME: str = 'demo_v1_h1_idiovol20_13factors_icir_roll126'
+FACTOR_NAME: str = 'demo_v1_h1_idiovol20_12factors_no_momentum10_icir_roll126'
 
 ITER_NOTE: dict = {
-    'op_type': 'combine_method',
-    'hypothesis': 'Shorten IC_IR weighting rolling window from 252 to 126 days to better adapt to HORIZON=1, expecting more relevant recent factor performance weights and a slight score increase.',
-    'change': 'In _icir_weights, change window=252 to window=126.',
-    'expected': 'score +0.02–0.05, rank_ic_ir possibly slightly higher.',
-    'parent_iter': 67,
-    'reasoning': 'HORIZON=1 implies rapid signal decay; factor ICs may shift faster. A shorter window captures recent regime changes better, similar to prior successful shift from EWM to rolling 252. 126 is a half-length compromise.',
+    'op_type': 'delete_factor',
+    'hypothesis': 'Removing f_momentum_10 (positive 10-day momentum) because it may introduce noise in a short-term reversal regime (HORIZON=1). Single change. Parent iter 70.',
+    'change': 'Deleted f_momentum_10 function and its entry from FACTORS list.',
+    'expected': 'score +0.03–0.07, rank_ic_ir possibly slightly improved by reducing contradictory trending signal.',
+    'parent_iter': 70,
+    'reasoning': 'HORIZON=1 favors reversal over momentum. All other factors are capped or negated to act as reversal predictors, but f_momentum_10 was kept as a pure positive momentum factor. Removing it should reduce systematic noise.',
 }
 
 
@@ -37,11 +37,6 @@ def _pivot(panel: pd.DataFrame, col: str) -> pd.DataFrame:
 def f_reversal_3(panel: pd.DataFrame) -> pd.DataFrame:
     close = _pivot(panel, 'close')
     return -close.pct_change(3, fill_method=None)
-
-
-def f_momentum_10(panel: pd.DataFrame) -> pd.DataFrame:
-    close = _pivot(panel, 'close')
-    return close.pct_change(10, fill_method=None)
 
 
 def f_volatility_10(panel: pd.DataFrame) -> pd.DataFrame:
@@ -154,7 +149,6 @@ def f_idio_vol_20(panel: pd.DataFrame) -> pd.DataFrame:
 
 FACTORS = [
     f_reversal_3,
-    f_momentum_10,
     f_volatility_10,
     f_amihud_20,
     f_hl_range_10,
@@ -166,7 +160,7 @@ FACTORS = [
     f_upper_shadow_ratio_5,
     f_lower_shadow_ratio_5,
     f_max_ret_20,
-    f_idio_vol_20,  # new
+    f_idio_vol_20,
 ]
 
 
@@ -203,7 +197,7 @@ def _icir_weights(factor_panels: list[pd.DataFrame], train_panel: pd.DataFrame) 
     import prepare
     labels = prepare.make_labels(train_panel, HORIZON, kind=LABEL_KIND)
     raw = []
-    window = 126  # <-- changed from 252
+    window = 126
     for f in factor_panels:
         ic = _daily_rank_ic(f, labels)
         if len(ic) < 20:
