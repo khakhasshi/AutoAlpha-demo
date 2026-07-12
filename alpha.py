@@ -10,12 +10,12 @@ LABEL_KIND: str = 'rank'
 FACTOR_NAME: str = 'demo_v1_h20_rank_composite_icir_decay'
 
 ITER_NOTE: dict = {
-    'op_type': 'preprocess',
-    'hypothesis': '使用rank+inverse normal变换替代winsorize+zscore，完全移除极值影响，提高信号稳健性，期望略微提升score。',
-    'change': '替换cs_winsorize_zscore为cs_rank_zscore，在所有因子和最终信号上应用。',
-    'expected': 'score提升0.02~0.08，因预处理更鲁棒。',
-    'parent_iter': 134,
-    'reasoning': '尽管IC_IR估计已用中位数/MAD，但预处理仍可能受极值干扰；rank-normalization是常用的稳健变换。'
+    'op_type': 'combine_method',
+    'hypothesis': '缩短指数衰减半衰期从126到63，使因子权重更快反映近期IC表现，以适应快速变化的市场，期望小幅提升score。',
+    'change': '修改 _icir_weights 函数的 decay_halflife 默认参数为63。',
+    'expected': 'score提升0.02~0.05，因为及时性改善。',
+    'parent_iter': 135,
+    'reasoning': '当前半衰期126(~6个月)可能无法及时反映因子表现变化；缩短至63(~1季度)给出更及时的权重调整，且仍在合理范围。'
 }
 
 
@@ -229,7 +229,7 @@ def _weighted_mad(values: np.ndarray, weights: np.ndarray, median: float) -> flo
     return _weighted_median(absdev, weights)
 
 
-def _icir_weights(factor_panels: list[pd.DataFrame], train_panel: pd.DataFrame, decay_halflife: int = 126) -> np.ndarray:
+def _icir_weights(factor_panels: list[pd.DataFrame], train_panel: pd.DataFrame, decay_halflife: int = 63) -> np.ndarray:
     import prepare
     labels = prepare.make_labels(train_panel, HORIZON, kind=LABEL_KIND)
 
