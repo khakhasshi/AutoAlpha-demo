@@ -10,12 +10,12 @@ LABEL_KIND: str = 'rank'
 FACTOR_NAME: str = 'demo_v1_h20_rank_composite_icir_decay'
 
 ITER_NOTE: dict = {
-    'op_type': 'combine_method',
-    'hypothesis': 'High-volatility stocks are more likely to have noisy signals; applying stronger smoothing to them will reduce false signals and turnover, improving year stability without hurting low-vol stocks.',
-    'change': 'After combining factors with ICIR decay weights and 5-day rolling median, compute per-stock 20-day volatility. For each stock, set EMA span = 2 + volatility_quantile * 4 (so span ranges 2–6). Apply ewm(span, adjust=False).mean() per stock before final cs_rank_zscore.',
-    'expected': 'Score +0.02-0.04 from reduced turnover and improved year_stability; slight lag but volatility-based smoothing preserves signal for stable stocks.',
-    'parent_iter': 224,
-    'reasoning': 'Bottleneck is year_stability_low; adaptive smoothing by volatility should reduce noise in high-vol names while keeping responsiveness for stable ones.'
+    'op_type': 'preprocess',
+    'hypothesis': 'A wider smoothing span range during high volatility reduces noise in the combined signal, leading to more consistent year-to-year performance.',
+    'change': 'Modify adaptive EMA span calculation: span = 3 + volatility_quantile * 9 (range [3,12]) instead of previous [2,6].',
+    'expected': 'Score +0.01-0.03 from improved year_stability; slight risk of lag but negligible.',
+    'parent_iter': 250,
+    'reasoning': 'Bottleneck is year_stability_low; wider span range gives stronger smoothing for high-vol stocks, reducing noise and improving stability.'
 }
 
 
@@ -380,7 +380,7 @@ def run(train_panel: pd.DataFrame, val_panel: pd.DataFrame) -> tuple[pd.DataFram
     sig_train_smooth = sig_train_raw.rolling(window=5, min_periods=1, center=False).median()
     sig_val_smooth = sig_val_raw.rolling(window=5, min_periods=1, center=False).median()
 
-    # --- adaptive EMA smoothing by volatility ---
+    # --- adaptive EMA smoothing by volatility with expanded span [3,12] ---
     close_train = _pivot(train_panel, 'close')
     ret_train = close_train.pct_change(fill_method=None)
     # rolling 20-day std as volatility proxy
@@ -389,9 +389,9 @@ def run(train_panel: pd.DataFrame, val_panel: pd.DataFrame) -> tuple[pd.DataFram
     avg_vol = roll_vol.mean()  # Series indexed by symbol
     # cross-sectional quantile (0-1)
     vol_quantile = avg_vol.rank(pct=True, method='average').clip(1e-6, 1 - 1e-6)
-    # span = 2 + quantile * 4, range [2,6]
-    span_train = 2.0 + vol_quantile * 4.0
-    span_train = span_train.clip(lower=2.0, upper=6.0)
+    # span = 3 + quantile * 9, range [3,12]
+    span_train = 3.0 + vol_quantile * 9.0
+    span_train = span_train.clip(lower=3.0, upper=12.0)
 
     def _apply_adaptive_ema(signal, span_series):
         """Apply ewm(span=s) per stock; for missing symbols use default span=4."""
