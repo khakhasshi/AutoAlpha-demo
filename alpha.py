@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import numpy as np
 import pandas as pd
+from scipy.stats import norm
 
 
 HORIZON: int = 20
@@ -9,25 +10,20 @@ LABEL_KIND: str = 'rank'
 FACTOR_NAME: str = 'demo_v1_h20_rank_composite_icir_decay'
 
 ITER_NOTE: dict = {
-    'op_type': 'combine_method',
-    'hypothesis': '使用加权中位数和MAD估计IC_IR以替代均值和标准差，提高权重对极值的稳健性，期望小幅提升score。',
-    'change': '修改_icir_weights函数，改用加权中位数和MAD计算IR。',
-    'expected': 'score提升0.01~0.05，因IR估计更稳定。',
-    'parent_iter': 129,
-    'reasoning': 'IC序列可能存在极值，均值和标准差受此影响，改用中位数和MAD可改善因子权重分配。'
+    'op_type': 'preprocess',
+    'hypothesis': '使用rank+inverse normal变换替代winsorize+zscore，完全移除极值影响，提高信号稳健性，期望略微提升score。',
+    'change': '替换cs_winsorize_zscore为cs_rank_zscore，在所有因子和最终信号上应用。',
+    'expected': 'score提升0.02~0.08，因预处理更鲁棒。',
+    'parent_iter': 134,
+    'reasoning': '尽管IC_IR估计已用中位数/MAD，但预处理仍可能受极值干扰；rank-normalization是常用的稳健变换。'
 }
 
 
-def cs_winsorize_zscore(f: pd.DataFrame, n_mad: float = 3.0) -> pd.DataFrame:
-    med = f.median(axis=1)
-    mad = (f.sub(med, axis=0)).abs().median(axis=1)
-    sigma = 1.4826 * mad
-    lower = med - n_mad * sigma
-    upper = med + n_mad * sigma
-    f_w = f.clip(lower=lower, upper=upper, axis=0)
-    mu = f_w.mean(axis=1)
-    sd = f_w.std(axis=1).replace(0, np.nan)
-    return f_w.sub(mu, axis=0).div(sd, axis=0)
+def cs_rank_zscore(f: pd.DataFrame) -> pd.DataFrame:
+    """Daily percentile rank -> inverse normal transform."""
+    pct = f.rank(axis=1, pct=True, method='average').clip(1e-10, 1 - 1e-10)
+    z = pd.DataFrame(norm.ppf(pct.values), index=pct.index, columns=pct.columns)
+    return z
 
 
 def _pivot(panel: pd.DataFrame, col: str) -> pd.DataFrame:
@@ -318,13 +314,13 @@ def _factor_panels(panel: pd.DataFrame) -> list[pd.DataFrame]:
     out = []
     for fn in FACTORS:
         f = fn(panel)
-        f = cs_winsorize_zscore(f)
+        f = cs_rank_zscore(f)
         out.append(f)
     return out
 
 
 def _finalize(signal: pd.DataFrame) -> pd.DataFrame:
-    return cs_winsorize_zscore(signal)
+    return cs_rank_zscore(signal)
 
 
 def run(train_panel: pd.DataFrame, val_panel: pd.DataFrame) -> tuple[pd.DataFrame, pd.DataFrame]:
