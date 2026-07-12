@@ -10,11 +10,11 @@ FACTOR_NAME: str = 'demo_v1_h1_idiovol10_13factors_no_momentum10_rev1_icir_roll1
 
 ITER_NOTE: dict = {
     'op_type': 'combine_method',
-    'hypothesis': '简化组合权重，用正 IC 均值直接成比例替代协方差逆求解，可能降低小样本协方差估计噪声，提升信号稳健性。',
-    'change': '修改 _icir_weights 内部权重计算，改为 weights = positive(mean_ic) / sum(positive(mean_ic))，若全部均值非正则回退等权。',
-    'expected': 'score 可能略有提升（约 +0.02~+0.1），因为避免了矩阵求逆的不稳定；也可能下降，若协方差信息有用。',
-    'parent_iter': 105,
-    'reasoning': '当前 ICIR 加权依赖协方差逆估计，样本有限时可能引入噪声。简单均值加权更稳健，且在因子相关性不高时接近最优。',
+    'hypothesis': '用 IC_IR（均值/标准差）替代纯 IC 均值加权，奖励 IC 稳定性高的因子，可能降低噪声因子权重，提升信号稳健性。',
+    'change': '修改 _icir_weights：对每个因子在训练期内计算 daily rank IC，取 IC_IR = mean(IC)/std(IC)，仅保留 IR>0 的因子并按比例赋权；若全部非正则回退等权。',
+    'expected': 'score 可能小幅提升（约 +0.05~+0.15），因为更稳定的因子获得更高权重；若 IC 标准差本身噪声大，可能效果不明显。',
+    'parent_iter': 110,
+    'reasoning': '#110 的简单均值加权已经稳定，引入 IC_IR 可以进一步区分因子质量，同时避免协方差矩阵求逆的过拟合问题。'
 }
 
 
@@ -232,19 +232,19 @@ def _icir_weights(factor_panels: list[pd.DataFrame], train_panel: pd.DataFrame) 
     if ic_matrix.shape[1] == 0:
         return np.ones(len(factor_panels)) / len(factor_panels)
 
-    # Mean IC per factor
-    mu_full = ic_matrix.mean(axis=0)
-    positive = mu_full > 0
-    if not positive.any():
+    # 计算每个因子的 IC_IR = mean(IC) / std(IC)，最少需要20个观测，否则设NaN
+    mu = ic_matrix.mean(axis=0, skipna=True)
+    std = ic_matrix.std(axis=0, skipna=True, ddof=1)
+    # 避免除零，将std过小的设为NaN
+    min_std = 1e-8
+    safe_std = std.where(std > min_std, np.nan)
+    ir = mu / safe_std
+    # 仅保留 IR > 0 的因子
+    positive_ir = ir.where(ir > 0, 0.0)
+    if positive_ir.sum() == 0:
         return np.ones(len(factor_panels)) / len(factor_panels)
-
-    # Simple proportion of positive mean IC
-    raw_w = np.maximum(mu_full, 0.0)  # keep original index for mapping
-    sum_w = raw_w.sum()
-    if sum_w <= 0:
-        return np.ones(len(factor_panels)) / len(factor_panels)
-    weights = raw_w / sum_w
-    # Ensure output length matches factor list
+    weights = positive_ir / positive_ir.sum()
+    # 确保输出长度与因子列表一致
     full_weights = np.zeros(len(factor_panels))
     full_weights[:len(weights)] = weights.values
     return full_weights
