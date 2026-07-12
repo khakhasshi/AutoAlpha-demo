@@ -4,17 +4,17 @@ import numpy as np
 import pandas as pd
 
 
-HORIZON: int = 1
+HORIZON: int = 5
 LABEL_KIND: str = 'rank'
-FACTOR_NAME: str = 'demo_v1_h1_idiovol10_13factors_no_momentum10_rev1_icir_roll126_maxret10'
+FACTOR_NAME: str = 'demo_v1_h5_idiovol10_13factors_no_momentum10_rev1_icir_roll126_maxret10'
 
 ITER_NOTE: dict = {
-    'op_type': 'combine_method',
-    'hypothesis': '用 IC_IR（均值/标准差）替代纯 IC 均值加权，奖励 IC 稳定性高的因子，可能降低噪声因子权重，提升信号稳健性。',
-    'change': '修改 _icir_weights：对每个因子在训练期内计算 daily rank IC，取 IC_IR = mean(IC)/std(IC)，仅保留 IR>0 的因子并按比例赋权；若全部非正则回退等权。',
-    'expected': 'score 可能小幅提升（约 +0.05~+0.15），因为更稳定的因子获得更高权重；若 IC 标准差本身噪声大，可能效果不明显。',
-    'parent_iter': 110,
-    'reasoning': '#110 的简单均值加权已经稳定，引入 IC_IR 可以进一步区分因子质量，同时避免协方差矩阵求逆的过拟合问题。'
+    'op_type': 'horizon',
+    'hypothesis': '将持有期从 1 天延长到 5 天，预期能显著降低换手率、改善交易质量，从而提升综合 score，尽管 IC 可能下降。',
+    'change': '仅修改全局常量 HORIZON = 5，因子库、预处理、IC_IR 加权方法均保持不变。',
+    'expected': 'score 可能提升 +0.2~+0.5，因为换手惩罚大幅减少，且超额夏普可能改善；但 IC 可能有所降低。',
+    'parent_iter': 113,
+    'reasoning': '当前 HORIZON=1 导致年换手极高，严重拉低 trade_v2 score。延长持有期是降低换手率的直接手段，同时可能提高信号稳健性。'
 }
 
 
