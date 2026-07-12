@@ -35,11 +35,29 @@ import pandas as pd
 import matplotlib
 matplotlib.use("Agg")  # 服务端无显示场景安全
 import matplotlib.pyplot as plt
+from matplotlib import font_manager
 from matplotlib import rcParams
 
-# 中文字体（finance 环境已有 SimHei / Microsoft YaHei）
-rcParams["font.sans-serif"] = ["Microsoft YaHei", "SimHei", "DejaVu Sans"]
-rcParams["axes.unicode_minus"] = False
+def _configure_plot_fonts() -> None:
+    """Prefer PingFang on macOS so Chinese labels do not render as tofu boxes."""
+    available = {font.name for font in font_manager.fontManager.ttflist}
+    preferred = [
+        "PingFang SC",
+        "PingFang TC",
+        "PingFang HK",
+        "PingFang MO",
+        "Microsoft YaHei",
+        "SimHei",
+        "Arial Unicode MS",
+        "Noto Sans CJK SC",
+        "DejaVu Sans",
+    ]
+    rcParams["font.family"] = "sans-serif"
+    rcParams["font.sans-serif"] = [name for name in preferred if name in available] + ["DejaVu Sans"]
+    rcParams["axes.unicode_minus"] = False
+
+
+_configure_plot_fonts()
 
 import prepare
 
@@ -524,7 +542,7 @@ def _plot_overview(
         f"H={score_report.horizon}   "
         f"label={score_report.label_kind}\n"
         f"图段: {nav_label}   |   {score_seg}",
-        fontsize=11, fontweight="bold",
+        fontsize=11,
     )
 
     def _rotate_xticks(ax, degrees: int = 45) -> None:
