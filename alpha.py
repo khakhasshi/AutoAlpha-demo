@@ -11,11 +11,11 @@ FACTOR_NAME: str = 'demo_v1_h20_rank_composite_icir_decay'
 
 ITER_NOTE: dict = {
     'op_type': 'combine_method',
-    'hypothesis': 'A 5-day rolling median further reduces day-to-day signal noise, leading to lower turnover and more consistent year-over-year performance without significantly harming IC.',
-    'change': 'In the final signal processing, change the rolling median window from 3 to 5 days. Keep all other steps (cs_rank_zscore per factor, ICIR decay weighting, final cs_rank_zscore) unchanged.',
-    'expected': 'Score +0.02-0.06 from reduced turnover penalty and improved year_stability; potential slight lag in signal responsiveness.',
-    'parent_iter': 220,
-    'reasoning': 'Current best bottleneck is year_stability_low; smoothing should reduce noise and improve stability without large IC loss.',
+    'hypothesis': 'High-volatility stocks are more likely to have noisy signals; applying stronger smoothing to them will reduce false signals and turnover, improving year stability without hurting low-vol stocks.',
+    'change': 'After combining factors with ICIR decay weights and 5-day rolling median, compute per-stock 20-day volatility. For each stock, set EMA span = 2 + volatility_quantile * 4 (so span ranges 2–6). Apply ewm(span, adjust=False).mean() per stock before final cs_rank_zscore.',
+    'expected': 'Score +0.02-0.04 from reduced turnover and improved year_stability; slight lag but volatility-based smoothing preserves signal for stable stocks.',
+    'parent_iter': 224,
+    'reasoning': 'Bottleneck is year_stability_low; adaptive smoothing by volatility should reduce noise in high-vol names while keeping responsiveness for stable ones.'
 }
 
 
@@ -379,7 +379,34 @@ def run(train_panel: pd.DataFrame, val_panel: pd.DataFrame) -> tuple[pd.DataFram
     # Apply 5-day rolling median smoothing per stock over time to reduce outlier noise
     sig_train_smooth = sig_train_raw.rolling(window=5, min_periods=1, center=False).median()
     sig_val_smooth = sig_val_raw.rolling(window=5, min_periods=1, center=False).median()
-    return _finalize(sig_train_smooth), _finalize(sig_val_smooth)
+
+    # --- adaptive EMA smoothing by volatility ---
+    close_train = _pivot(train_panel, 'close')
+    ret_train = close_train.pct_change(fill_method=None)
+    # rolling 20-day std as volatility proxy
+    roll_vol = ret_train.rolling(20, min_periods=5).std()
+    # average volatility over train period for each stock
+    avg_vol = roll_vol.mean()  # Series indexed by symbol
+    # cross-sectional quantile (0-1)
+    vol_quantile = avg_vol.rank(pct=True, method='average').clip(1e-6, 1 - 1e-6)
+    # span = 2 + quantile * 4, range [2,6]
+    span_train = 2.0 + vol_quantile * 4.0
+    span_train = span_train.clip(lower=2.0, upper=6.0)
+
+    def _apply_adaptive_ema(signal, span_series):
+        """Apply ewm(span=s) per stock; for missing symbols use default span=4."""
+        cols = signal.columns
+        spans = span_series.reindex(cols).fillna(4.0)
+        smoothed = signal.copy()
+        for col in cols:
+            s = spans[col]
+            smoothed[col] = signal[col].ewm(span=s, adjust=False, min_periods=1).mean()
+        return smoothed
+
+    sig_train_ema = _apply_adaptive_ema(sig_train_smooth, span_train)
+    sig_val_ema = _apply_adaptive_ema(sig_val_smooth, span_train)  # same mapping
+
+    return _finalize(sig_train_ema), _finalize(sig_val_ema)
 
 
 if __name__ == '__main__':
