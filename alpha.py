@@ -6,15 +6,15 @@ import pandas as pd
 
 HORIZON: int = 1
 LABEL_KIND: str = 'rank'
-FACTOR_NAME: str = 'demo_v1_h1_idiovol20_12factors_no_momentum10_rev1_icir_roll126'
+FACTOR_NAME: str = 'demo_v1_h1_idiovol10_13factors_no_momentum10_rev1_icir_roll126'
 
 ITER_NOTE: dict = {
     'op_type': 'modify_factor',
-    'hypothesis': 'Shortening reversal window from 3 to 1 day to better align with HORIZON=1, expecting improved signal responsiveness.',
-    'change': 'Replaced f_reversal_3 with f_reversal_1 (1-day return negated). All other factors and IC_IR weighting unchanged.',
+    'hypothesis': 'Shortening idiosyncratic volatility window from 20 to 10 days to better align with HORIZON=1, expecting improved signal responsiveness.',
+    'change': 'Replaced f_idio_vol_20 with f_idio_vol_10 (rolling window 10 days, min_periods 5). All other factors and IC_IR weighting unchanged.',
     'expected': 'score improvement of 0.02–0.05.',
-    'parent_iter': 83,
-    'reasoning': 'With HORIZON=1, ultra-short-term reversal may be more relevant than a 3-day window, which could average out recent signals.',
+    'parent_iter': 91,
+    'reasoning': 'With HORIZON=1, more recent residual volatility may contain stronger reversal information than a 20-day window.',
 }
 
 
@@ -134,16 +134,14 @@ def f_max_ret_20(panel: pd.DataFrame) -> pd.DataFrame:
     return -max_ret
 
 
-def f_idio_vol_20(panel: pd.DataFrame) -> pd.DataFrame:
-    '''Idiosyncratic volatility: rolling 20-day std of residual returns
+def f_idio_vol_10(panel: pd.DataFrame) -> pd.DataFrame:
+    '''Idiosyncratic volatility: rolling 10-day std of residual returns
     from equal-weight market model. Negated – low idio vol predicts higher returns.'''
     close = _pivot(panel, 'close')
     ret = close.pct_change(fill_method=None)
-    # equal-weight market return (ignore NaN)
     mkt_ret = ret.mean(axis=1, skipna=True)
-    # residual returns: stock return minus market return
     residual = ret.sub(mkt_ret, axis=0)
-    idio_vol = residual.rolling(20, min_periods=5).std()
+    idio_vol = residual.rolling(10, min_periods=5).std()
     return -idio_vol
 
 
@@ -160,7 +158,7 @@ FACTORS = [
     f_upper_shadow_ratio_5,
     f_lower_shadow_ratio_5,
     f_max_ret_20,
-    f_idio_vol_20,
+    f_idio_vol_10,
 ]
 
 
@@ -177,7 +175,7 @@ def _align_factors(factor_panels: list[pd.DataFrame]) -> tuple[list[pd.DataFrame
 
 def combine_equal_weight(factor_panels: list[pd.DataFrame]) -> pd.DataFrame:
     aligned, common_idx, common_cols = _align_factors(factor_panels)
-    stacked = np.stack([f.values for f in aligned], axis=0)   # [F, T, N]
+    stacked = np.stack([f.values for f in aligned], axis=0)
     import warnings
     with warnings.catch_warnings():
         warnings.filterwarnings('ignore', message='Mean of empty slice')
