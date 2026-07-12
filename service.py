@@ -277,6 +277,217 @@ def memory_prompt_text(memory: dict[str, Any]) -> str:
     }, ensure_ascii=False, indent=2)
 
 
+def current_score_version() -> str:
+    try:
+        import prepare
+        return getattr(prepare, "SCORE_VERSION", "demo_v1")
+    except Exception:
+        return "demo_v1"
+
+
+def current_best_record() -> dict[str, Any] | None:
+    best_path = ROOT / "journal" / "best.json"
+    runs_path = ROOT / "journal" / "runs.jsonl"
+    if not best_path.exists() or not runs_path.exists():
+        return None
+    try:
+        best = json.loads(best_path.read_text(encoding="utf-8"))
+        best_iter = best.get("iter_id")
+    except Exception:
+        best_iter = None
+    records = []
+    for line in runs_path.read_text(encoding="utf-8").splitlines():
+        if not line.strip():
+            continue
+        try:
+            rec = json.loads(line)
+        except Exception:
+            continue
+        if best_iter is not None and rec.get("iter_id") == best_iter:
+            return rec
+        if rec.get("score_version") == current_score_version() and rec.get("decision") == "ACCEPTED":
+            records.append(rec)
+    return max(records, key=lambda r: r.get("score") or float("-inf"), default=None)
+
+
+def detect_bottlenecks() -> dict[str, Any]:
+    rec = current_best_record() or {}
+    raw = ((rec.get("score_breakdown") or {}).get("raw") or {})
+    weighted = ((rec.get("score_breakdown") or {}).get("weighted") or {})
+    bottlenecks: list[dict[str, Any]] = []
+
+    def add(key: str, label: str, severity: float, evidence: dict[str, Any], advice: str) -> None:
+        if severity <= 0:
+            return
+        bottlenecks.append({
+            "key": key,
+            "label": label,
+            "severity": round(float(severity), 4),
+            "evidence": evidence,
+            "advice": advice,
+        })
+
+    year_stability = raw.get("year_stability")
+    positive_year_ratio = raw.get("positive_year_ratio")
+    if isinstance(year_stability, int | float) or isinstance(positive_year_ratio, int | float):
+        sev = max(0.0, -float(year_stability or 0.0)) + max(0.0, 0.67 - float(positive_year_ratio or 0.0))
+        add(
+            "year_stability_low",
+            "年度稳定性偏弱",
+            sev,
+            {"year_stability": year_stability, "positive_year_ratio": positive_year_ratio, "weighted": weighted.get("year_stability_term")},
+            "优先尝试降低年份间收益波动、减少单一年份依赖，保留低换手平滑带来的优势。",
+        )
+
+    turnover_penalty = raw.get("turnover_penalty")
+    annual_turnover = raw.get("annual_turnover")
+    if isinstance(turnover_penalty, int | float) or isinstance(annual_turnover, int | float):
+        sev = max(0.0, float(turnover_penalty or 0.0)) + max(0.0, (float(annual_turnover or 0.0) - 40.0) / 40.0)
+        add(
+            "turnover_penalty_high",
+            "换手惩罚偏高",
+            sev,
+            {"annual_turnover": annual_turnover, "turnover_penalty": turnover_penalty, "weighted": weighted.get("turnover_penalty_term")},
+            "优先考虑最终信号平滑、权重稳定、删除高换手噪声因子；避免牺牲太多 IC。",
+        )
+
+    excess_efficiency = raw.get("excess_efficiency")
+    return_efficiency = raw.get("return_efficiency")
+    excess_sharpe = raw.get("excess_sharpe")
+    sev = 0.0
+    if isinstance(excess_efficiency, int | float):
+        sev += max(0.0, 0.80 - float(excess_efficiency))
+    if isinstance(return_efficiency, int | float):
+        sev += max(0.0, 0.25 - float(return_efficiency))
+    if isinstance(excess_sharpe, int | float):
+        sev += max(0.0, 0.45 - float(excess_sharpe))
+    add(
+        "efficiency_low",
+        "收益/回撤效率仍可提升",
+        sev,
+        {"excess_efficiency": excess_efficiency, "return_efficiency": return_efficiency, "excess_sharpe": excess_sharpe},
+        "优先寻找提升收益质量而不增加回撤的改动，避免只追 IC。",
+    )
+
+    redundancy_penalty = raw.get("redundancy_penalty")
+    max_factor_corr = raw.get("max_factor_corr")
+    if isinstance(redundancy_penalty, int | float) or isinstance(max_factor_corr, int | float):
+        sev = max(0.0, float(redundancy_penalty or 0.0)) + max(0.0, (float(max_factor_corr or 0.0) - 0.75) / 0.15)
+        add(
+            "redundancy_high",
+            "因子同质化风险",
+            sev,
+            {"max_factor_corr": max_factor_corr, "redundancy_penalty": redundancy_penalty, "weighted": weighted.get("redundancy_penalty_term")},
+            "避免直接追加相似因子；若探索新因子，先考虑残差化或删减替代。",
+        )
+
+    factor_count = raw.get("factor_count")
+    alpha_lines = raw.get("alpha_lines")
+    complexity_penalty = raw.get("complexity_penalty")
+    code_complexity_penalty = raw.get("code_complexity_penalty")
+    sev = max(0.0, float(complexity_penalty or 0.0)) + max(0.0, float(code_complexity_penalty or 0.0))
+    add(
+        "complexity_high",
+        "复杂度偏高",
+        sev,
+        {"factor_count": factor_count, "alpha_lines": alpha_lines, "complexity_penalty": complexity_penalty, "code_complexity_penalty": code_complexity_penalty},
+        "优先删减、合并或简化，而不是增加黑盒模型。",
+    )
+
+    bottlenecks.sort(key=lambda x: x["severity"], reverse=True)
+    return {
+        "score_version": rec.get("score_version") or current_score_version(),
+        "best_iter": rec.get("iter_id"),
+        "best_score": rec.get("score"),
+        "top": bottlenecks[:3],
+        "raw": raw,
+        "weighted": weighted,
+    }
+
+
+def normalize_proposals(payload: dict[str, Any]) -> list[dict[str, Any]]:
+    proposals = payload.get("proposals")
+    if not isinstance(proposals, list):
+        return []
+    out = []
+    for i, item in enumerate(proposals[:3], start=1):
+        if not isinstance(item, dict):
+            continue
+        proposal = {
+            "id": str(item.get("id") or f"p{i}"),
+            "summary": str(item.get("summary") or item.get("title") or ""),
+            "hypothesis": str(item.get("hypothesis") or ""),
+            "change": str(item.get("change") or ""),
+            "expected": str(item.get("expected") or ""),
+            "op_type": str(item.get("op_type") or "other"),
+            "targets": item.get("targets") if isinstance(item.get("targets"), list) else [],
+            "risk": str(item.get("risk") or ""),
+        }
+        if proposal["summary"] and proposal["hypothesis"] and proposal["change"]:
+            out.append(proposal)
+    return out
+
+
+def score_proposal_for_gate(proposal: dict[str, Any], bottleneck: dict[str, Any], memory: dict[str, Any]) -> tuple[float, list[str]]:
+    text = " ".join(str(proposal.get(k, "")) for k in ("summary", "hypothesis", "change", "expected", "risk")).lower()
+    targets = " ".join(str(t).lower() for t in proposal.get("targets", []))
+    combined = f"{text} {targets}"
+    score = 0.0
+    reasons: list[str] = []
+    for b in bottleneck.get("top", []):
+        key = b.get("key")
+        severity = float(b.get("severity") or 0.0)
+        if key == "year_stability_low" and any(w in combined for w in ("year", "annual stability", "stability", "stable", "smooth", "jaccard", "年度", "稳定")):
+            score += 4.0 + severity
+            reasons.append("targets year stability")
+        if key == "turnover_penalty_high" and any(w in combined for w in ("turnover", "smooth", "ewm", "holding", "换手", "平滑")):
+            score += 3.5 + severity
+            reasons.append("targets turnover")
+        if key == "efficiency_low" and any(w in combined for w in ("efficiency", "drawdown", "sharpe", "return", "收益", "回撤", "效率")):
+            score += 3.0 + severity
+            reasons.append("targets efficiency")
+        if key == "redundancy_high" and any(w in combined for w in ("orthogonal", "residual", "delete", "remove", "去相关", "残差", "删除")):
+            score += 3.0 + severity
+            reasons.append("targets redundancy")
+        if key == "complexity_high" and any(w in combined for w in ("delete", "remove", "simplify", "删", "简化")):
+            score += 2.5 + severity
+            reasons.append("targets complexity")
+
+    op_type = proposal.get("op_type")
+    if op_type == "add_factor":
+        score -= 0.8
+        reasons.append("add_factor risk")
+    if op_type in {"preprocess", "combine_method", "delete_factor"}:
+        score += 0.4
+    if any(w in combined for w in ("halflife", "half-life", "半衰期", "horizon", "label_kind", "窗口微调")):
+        score -= 2.5
+        reasons.append("likely local tweak")
+    recent_avoid = " ".join(str(x).lower() for x in memory.get("avoid", [])[-6:])
+    if proposal.get("summary", "").lower()[:60] and proposal.get("summary", "").lower()[:60] in recent_avoid:
+        score -= 3.0
+        reasons.append("resembles recent avoid")
+    if any(w in combined for w in ("lightgbm", "mlp", "torch", "ridgecv", "black box", "黑盒")):
+        score -= 1.5
+        reasons.append("complex model risk")
+    return score, reasons
+
+
+def select_proposal(proposals: list[dict[str, Any]], bottleneck: dict[str, Any], memory: dict[str, Any]) -> dict[str, Any]:
+    if not proposals:
+        raise RuntimeError("Proposal gate received no usable proposals.")
+    scored = []
+    for proposal in proposals:
+        score, reasons = score_proposal_for_gate(proposal, bottleneck, memory)
+        item = dict(proposal)
+        item["gate_score"] = round(score, 4)
+        item["gate_reasons"] = reasons
+        scored.append(item)
+    scored.sort(key=lambda x: x["gate_score"], reverse=True)
+    selected = scored[0]
+    selected["all_candidates"] = scored
+    return selected
+
+
 def update_memory_after_iteration(
     iteration: int,
     proposal: dict[str, Any],
@@ -294,6 +505,7 @@ def update_memory_after_iteration(
         "score": score,
         "summary": proposal.get("summary"),
         "research_note": proposal.get("research_note"),
+        "selected_proposal": proposal.get("selected_proposal"),
         "error": run.get("error"),
         "score_anomaly": run.get("score_anomaly"),
     }
@@ -524,27 +736,79 @@ def journal_runs(limit: int = 80) -> list[dict[str, Any]]:
     return rows[-limit:]
 
 
-def build_prompt() -> list[dict[str, str]]:
+def context_blocks() -> dict[str, Any]:
     cfg = load_config()
     memory_block = ""
+    memory = load_memory()
     if cfg.get("memory_enabled", True):
         memory_block = f"""
 Persistent service memory:
-{memory_prompt_text(load_memory())}
+{memory_prompt_text(memory)}
 
 Use this memory to avoid repeating failed ideas and to build on accepted or promising results.
 """
-    program = read_text("program.md")
-    evaluation = read_text("evaluation.md")
-    alpha = read_text("alpha.py", max_chars=40000)
-    status = latest_runner_status()
+    return {
+        "cfg": cfg,
+        "memory": memory,
+        "memory_block": memory_block,
+        "program": read_text("program.md"),
+        "evaluation": read_text("evaluation.md"),
+        "alpha": read_text("alpha.py", max_chars=40000),
+        "status": latest_runner_status(),
+        "bottleneck": detect_bottlenecks(),
+    }
+
+
+def build_proposal_prompt(ctx: dict[str, Any]) -> list[dict[str, str]]:
+    system = (
+        "You are an autonomous quantitative research coding agent inside the AutoAlpha demo. "
+        "First act as a research planner only. Do not write alpha.py yet. "
+        "Return strict JSON only."
+    )
+    user = f"""
+We need proposal candidates for the next AutoAlpha iteration.
+
+Rules:
+- Return a JSON object with exactly one key: proposals.
+- proposals must contain exactly 3 candidate objects.
+- Each object must contain: id, summary, hypothesis, change, expected, op_type, targets, risk.
+- Do not write alpha_py in this response.
+- Each proposal must be a single-point experiment.
+- Prefer candidates that address the bottleneck detector below.
+- Avoid repeating recent rejected ideas in memory.
+- Avoid tiny half-life/window/label tweaks unless the bottleneck clearly demands them.
+{ctx["memory_block"]}
+
+Current runner status:
+{ctx["status"]}
+
+Bottleneck detector:
+{json.dumps(ctx["bottleneck"], ensure_ascii=False, indent=2)}
+
+program.md:
+{ctx["program"]}
+
+evaluation.md:
+{ctx["evaluation"]}
+
+Current alpha.py summary only:
+- Full code will be provided after proposal selection.
+- Current best is in memory and runner status.
+"""
+    return [{"role": "system", "content": system}, {"role": "user", "content": user}]
+
+
+def build_prompt(selected_proposal: dict[str, Any], ctx: dict[str, Any]) -> list[dict[str, str]]:
     system = (
         "You are an autonomous quantitative research coding agent inside the AutoAlpha demo. "
         "Your only allowed code change is replacing alpha.py. Obey program.md and evaluation.md. "
-        "Make exactly one research change per iteration. Return strict JSON only."
+        "Implement exactly the selected single research proposal. Return strict JSON only."
     )
     user = f"""
-We need the next AutoAlpha iteration.
+We selected one proposal through the local proposal gate. Implement only this proposal.
+
+Selected proposal:
+{json.dumps({k: v for k, v in selected_proposal.items() if k != "all_candidates"}, ensure_ascii=False, indent=2)}
 
 Rules:
 - Return a JSON object with keys: summary, research_note, alpha_py.
@@ -553,21 +817,24 @@ Rules:
 - Do not include any source strings forbidden by program.md inside alpha_py.
 - Keep the public contract: HORIZON, LABEL_KIND, ITER_NOTE, FACTORS, run(train_panel, val_panel).
 - Use only train data to estimate any fitted parameters. Validation is for runner evaluation only.
-- Prefer a single clear hypothesis likely to improve prepare.primary_score, unless the latest logs suggest a score anomaly.
-- The current phase is post-convergence: prefer low-correlation new factors, orthogonalization, lower turnover, or return/drawdown-efficiency improvements over small IC decay/window tweaks.
-{memory_block}
+- The implementation must match the selected proposal; do not switch to a different idea.
+- The current phase is post-convergence: prefer low-correlation, low-turnover, stable, simple changes over small IC decay/window tweaks.
+{ctx["memory_block"]}
 
 Current runner status:
-{status}
+{ctx["status"]}
+
+Bottleneck detector:
+{json.dumps(ctx["bottleneck"], ensure_ascii=False, indent=2)}
 
 program.md:
-{program}
+{ctx["program"]}
 
 evaluation.md:
-{evaluation}
+{ctx["evaluation"]}
 
 current alpha.py:
-{alpha}
+{ctx["alpha"]}
 """
     return [{"role": "system", "content": system}, {"role": "user", "content": user}]
 
@@ -696,9 +963,28 @@ def one_iteration() -> bool:
         RUNTIME["last_error"] = None
     append_log("audit", "iteration_started", {"iteration": iteration})
 
-    messages = build_prompt()
-    append_log("research", "context_built", {"iteration": iteration, "message_count": len(messages)})
+    ctx = context_blocks()
+    proposal_messages = build_proposal_prompt(ctx)
+    append_log("research", "proposal_context_built", {
+        "iteration": iteration,
+        "message_count": len(proposal_messages),
+        "bottleneck": ctx.get("bottleneck"),
+    })
+    proposal_payload = call_openai_compatible(cfg, proposal_messages)
+    candidates = normalize_proposals(proposal_payload)
+    selected = select_proposal(candidates, ctx["bottleneck"], ctx["memory"])
+    append_log("research", "proposal_gate_selected", {
+        "iteration": iteration,
+        "selected": {k: v for k, v in selected.items() if k != "all_candidates"},
+        "candidates": selected.get("all_candidates", []),
+        "bottleneck": ctx.get("bottleneck"),
+    })
+
+    messages = build_prompt(selected, ctx)
+    append_log("research", "implementation_context_built", {"iteration": iteration, "message_count": len(messages)})
     proposal = call_openai_compatible(cfg, messages)
+    proposal["selected_proposal"] = {k: v for k, v in selected.items() if k != "all_candidates"}
+    proposal["proposal_candidates"] = selected.get("all_candidates", [])
     alpha_py = proposal.get("alpha_py")
     if not isinstance(alpha_py, str) or "def run(" not in alpha_py or "ITER_NOTE" not in alpha_py:
         raise RuntimeError("Proposal missing a complete alpha_py with ITER_NOTE and run().")
@@ -706,6 +992,7 @@ def one_iteration() -> bool:
         "iteration": iteration,
         "summary": proposal.get("summary"),
         "research_note": proposal.get("research_note"),
+        "selected_proposal": proposal.get("selected_proposal"),
         "alpha_chars": len(alpha_py),
     })
 
@@ -1230,8 +1517,19 @@ INDEX_HTML = r"""<!doctype html>
         return {
           title: `研究提案 · service iter ${p.iteration}`,
           summary: shortText(p.summary || p.research_note || '模型返回候选 alpha.py', 320),
-          chips: [`alpha ${p.alpha_chars || 0} chars`, rec.event],
+          chips: [`alpha ${p.alpha_chars || 0} chars`, p.selected_proposal?.op_type || rec.event],
         };
+      }
+      if (rec.kind === 'research' && rec.event === 'proposal_context_built') {
+        const top = p.bottleneck?.top?.map(x => x.label).join(' / ') || 'no bottleneck';
+        return { title: `Proposal gate · 候选请求`, summary: `先请求 3 个候选方向。当前瓶颈：${top}`, chips: [`iter ${p.iteration}`, `messages ${p.message_count}`] };
+      }
+      if (rec.kind === 'research' && rec.event === 'proposal_gate_selected') {
+        const selected = p.selected || {};
+        return { title: `Proposal gate · 已选择`, summary: shortText(selected.summary || selected.hypothesis || '已选择一个候选进入实现阶段。', 320), chips: [`iter ${p.iteration}`, `gate ${fmt(Number(selected.gate_score), 2)}`, selected.op_type || '--'] };
+      }
+      if (rec.kind === 'research' && rec.event === 'implementation_context_built') {
+        return { title: `实现上下文已构建`, summary: `已把 gate 选中的候选和完整 alpha.py 发给模型实现。`, chips: [`iter ${p.iteration}`, `messages ${p.message_count}`] };
       }
       if (rec.kind === 'research' && rec.event === 'context_built') {
         return { title: `上下文已构建 · service iter ${p.iteration}`, summary: `已收集 program、evaluation、当前 alpha 与 runner status。`, chips: [`messages ${p.message_count}`] };
@@ -1436,6 +1734,8 @@ class Handler(BaseHTTPRequestHandler):
                 self._json(load_config(include_secret=False))
             elif self.path.startswith("/api/memory"):
                 self._json(load_memory())
+            elif self.path.startswith("/api/bottleneck"):
+                self._json(detect_bottlenecks())
             elif self.path.startswith("/api/scores"):
                 self._json(score_series())
             elif self.path.startswith("/api/runs"):
