@@ -6,15 +6,15 @@ import pandas as pd
 
 HORIZON: int = 20
 LABEL_KIND: str = 'rank'
-FACTOR_NAME: str = 'demo_v1_h20_rank_composite_icir'
+FACTOR_NAME: str = 'demo_v1_h20_rank_composite_icir_decay'
 
 ITER_NOTE: dict = {
     'op_type': 'combine_method',
-    'hypothesis': '使用复合IC_IR（rank IC IR + 0.5 * pearson IC IR）作为因子权重，以同时优化rank IC和pearson IC，提升score中pearson IC项。',
-    'change': '修改_icir_weights：增加_daily_pearson_ic计算，权重正比于 max(0, ir_rank + 0.5 * ir_pearson)。保持其他不变。',
-    'expected': 'score小幅提升0.03~0.1，因pearson IC改善。',
-    'parent_iter': 123,
-    'reasoning': '当前best已利用rank IC的IR，加入pearson IC信息可提供额外信号，且不增加复杂度。'
+    'hypothesis': '使用指数衰减加权的复合IC_IR（半衰期126天），使近期IC表现好的因子获得更高权重，以适应当前市场结构，期望小幅提升score。',
+    'change': '修改_icir_weights函数，引入时间衰减权重；衰减半衰期126个交易日。',
+    'expected': 'score提升0.02~0.08，因ICIR更注重近期表现。',
+    'parent_iter': 124,
+    'reasoning': '当前best使用等权历史IC_IR，可能无法及时反映因子近期有效性变化，引入衰减有望改善权重动态。'
 }
 
 
@@ -218,7 +218,7 @@ def _daily_pearson_ic(signal: pd.DataFrame, labels: pd.DataFrame) -> pd.Series:
     return sig.corrwith(lab, axis=1).dropna()
 
 
-def _icir_weights(factor_panels: list[pd.DataFrame], train_panel: pd.DataFrame) -> np.ndarray:
+def _icir_weights(factor_panels: list[pd.DataFrame], train_panel: pd.DataFrame, decay_halflife: int = 126) -> np.ndarray:
     import prepare
     labels = prepare.make_labels(train_panel, HORIZON, kind=LABEL_KIND)
 
@@ -234,47 +234,59 @@ def _icir_weights(factor_panels: list[pd.DataFrame], train_panel: pd.DataFrame) 
             ic_list_rank.append(ic_r)
             ic_list_pearson.append(ic_p)
 
-    common_dates = None
-    for ic in ic_list_rank:
-        if not ic.empty:
-            if common_dates is None:
-                common_dates = ic.index
+    # collect all non-empty dates and find latest reference date
+    all_dates = pd.DatetimeIndex([])
+    for s in ic_list_rank + ic_list_pearson:
+        if not s.empty:
+            all_dates = all_dates.union(s.index)
+    if len(all_dates) == 0:
+        return np.ones(len(factor_panels)) / len(factor_panels)
+    ref_date = all_dates.max()
+    date_diffs = (ref_date - all_dates).days
+    decay_weights = np.exp(-np.log(2) * date_diffs / decay_halflife)
+    decay_weights = pd.Series(decay_weights, index=all_dates)
+
+    ir_rank = []
+    ir_pearson = []
+    for ic_r, ic_p in zip(ic_list_rank, ic_list_pearson):
+        # rank IC
+        if ic_r.empty or len(ic_r) < 20:
+            ir_rank.append(0.0)
+        else:
+            common = ic_r.index.intersection(all_dates)
+            if len(common) < 20:
+                ir_rank.append(0.0)
             else:
-                common_dates = common_dates.intersection(ic.index)
+                w = decay_weights.loc[common]
+                ic_vals = ic_r.loc[common].values
+                w = w.values
+                mu = np.average(ic_vals, weights=w)
+                # Weighted std: sqrt(average((x - mu)^2, weights=w))
+                std = np.sqrt(np.average((ic_vals - mu) ** 2, weights=w))
+                ir = mu / (std + 1e-8)
+                ir_rank.append(ir)
+        # pearson IC
+        if ic_p.empty or len(ic_p) < 20:
+            ir_pearson.append(0.0)
+        else:
+            common = ic_p.index.intersection(all_dates)
+            if len(common) < 20:
+                ir_pearson.append(0.0)
+            else:
+                w = decay_weights.loc[common]
+                ic_vals = ic_p.loc[common].values
+                w = w.values
+                mu = np.average(ic_vals, weights=w)
+                std = np.sqrt(np.average((ic_vals - mu) ** 2, weights=w))
+                ir = mu / (std + 1e-8)
+                ir_pearson.append(ir)
 
-    if common_dates is None or len(common_dates) < 20:
-        return np.ones(len(factor_panels)) / len(factor_panels)
-
-    rank_ic_mat = pd.DataFrame({i: ic.reindex(common_dates) for i, ic in enumerate(ic_list_rank)})
-    rank_ic_mat = rank_ic_mat.dropna(axis=1, how='all')
-    pearson_ic_mat = pd.DataFrame({i: ic.reindex(common_dates) for i, ic in enumerate(ic_list_pearson)})
-    pearson_ic_mat = pearson_ic_mat.dropna(axis=1, how='all')
-
-    common_cols = rank_ic_mat.columns.intersection(pearson_ic_mat.columns)
-    rank_ic_mat = rank_ic_mat[common_cols]
-    pearson_ic_mat = pearson_ic_mat[common_cols]
-
-    if len(common_cols) == 0:
-        return np.ones(len(factor_panels)) / len(factor_panels)
-
-    mu_rank = rank_ic_mat.mean()
-    std_rank = rank_ic_mat.std()
-    ir_rank = mu_rank / (std_rank.replace(0, np.nan)).clip(lower=1e-8)
-
-    mu_pearson = pearson_ic_mat.mean()
-    std_pearson = pearson_ic_mat.std()
-    ir_pearson = mu_pearson / (std_pearson.replace(0, np.nan)).clip(lower=1e-8)
-
-    composite_ir = ir_rank + 0.5 * ir_pearson
-    positive_ir = composite_ir.clip(lower=0)
+    composite_ir = np.array(ir_rank) + 0.5 * np.array(ir_pearson)
+    positive_ir = np.maximum(composite_ir, 0)
     if positive_ir.sum() == 0:
         return np.ones(len(factor_panels)) / len(factor_panels)
-
     weights = positive_ir / positive_ir.sum()
-    full_weights = np.zeros(len(factor_panels))
-    for col, w in weights.items():
-        full_weights[col] = w
-    return full_weights
+    return weights
 
 
 def combine_icir_weight(factor_panels: list[pd.DataFrame], weights: np.ndarray) -> pd.DataFrame:
