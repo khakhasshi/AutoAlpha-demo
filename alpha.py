@@ -10,11 +10,11 @@ FACTOR_NAME: str = 'demo_v1_h1_idiovol10_13factors_no_momentum10_rev1_icir_roll1
 
 ITER_NOTE: dict = {
     'op_type': 'combine_method',
-    'hypothesis': 'Shrinking IC_IR estimates towards the cross-factor mean reduces weight noise and should improve rank_ic_ir stability.',
-    'change': 'In _icir_weights, apply 0.2 shrinkage to each valid factor\'s raw IC_IR before computing normalized weights.',
-    'expected': 'score increase of 0.02–0.04 via a slightly higher rank_ic_ir.',
-    'parent_iter': 92,
-    'reasoning': 'With 13 factors and HORIZON=1, IC_IR estimates are noisy; shrinkage acts as a light regulariser that should make combined forecasts more consistent.',
+    'hypothesis': 'Optimize factor weights using IC covariance matrix to maximize combined IC_IR, rather than individual IC_IR. This should produce more stable and diversified weights.',
+    'change': 'Replace rolling IC_IR estimation in _icir_weights with global covariance-based optimization on train IC series. Regularize covariance to avoid singularity.',
+    'expected': 'score improvement of 0.02-0.05 due to higher rank_ic_ir.',
+    'parent_iter': 93,
+    'reasoning': 'Individual IC_IR does not account for factor correlations; mean-variance optimization on IC space can improve the risk-adjusted performance of the combined signal in-sample, hopefully generalizing to validation.',
 }
 
 
@@ -194,36 +194,62 @@ def _daily_rank_ic(signal: pd.DataFrame, labels: pd.DataFrame) -> pd.Series:
 def _icir_weights(factor_panels: list[pd.DataFrame], train_panel: pd.DataFrame) -> np.ndarray:
     import prepare
     labels = prepare.make_labels(train_panel, HORIZON, kind=LABEL_KIND)
-    raw = []
-    valid_mask = []
-    window = 126
+
+    # Compute daily rank IC for each factor
+    ic_list = []
     for f in factor_panels:
         ic = _daily_rank_ic(f, labels)
         if len(ic) < 20:
-            raw.append(0.0)
-            valid_mask.append(False)
-            continue
-        wm = ic.rolling(window=window, min_periods=20).mean().iloc[-1]
-        ws = ic.rolling(window=window, min_periods=20).std().iloc[-1]
-        if np.isnan(wm) or np.isnan(ws) or ws == 0:
-            raw.append(0.0)
-            valid_mask.append(False)
+            ic_list.append(pd.Series(dtype=float))
         else:
-            raw.append(wm / ws)
-            valid_mask.append(True)
-    w = np.asarray(raw, dtype=float)
-    valid_mask = np.array(valid_mask)
-    # shrinkage: pull valid IC_IR estimates towards their cross‑sectional mean
-    if valid_mask.any():
-        mean_ir = np.mean(w[valid_mask])
-        shrink = 0.2
-        for i in range(len(w)):
-            if valid_mask[i]:
-                w[i] = (1.0 - shrink) * w[i] + shrink * mean_ir
-    denom = np.nansum(np.abs(w))
-    if denom <= 0.0:
-        return np.ones(len(factor_panels), dtype=float) / len(factor_panels)
-    return w / denom
+            ic_list.append(ic)
+
+    # Align on common dates
+    common_dates = None
+    for ic in ic_list:
+        if not ic.empty:
+            if common_dates is None:
+                common_dates = ic.index
+            else:
+                common_dates = common_dates.intersection(ic.index)
+
+    if common_dates is None or len(common_dates) < 20:
+        # fallback to equal weight
+        return np.ones(len(factor_panels)) / len(factor_panels)
+
+    # Build IC matrix [T, K]
+    ic_matrix = pd.DataFrame({i: ic.reindex(common_dates) for i, ic in enumerate(ic_list)})
+    ic_matrix = ic_matrix.dropna(axis=1, how='all')  # drop factors with no valid IC
+    if ic_matrix.shape[1] == 0:
+        return np.ones(len(factor_panels)) / len(factor_panels)
+
+    # Keep only factors with positive mean IC (threshold 1e-5)
+    mu_full = ic_matrix.mean(axis=0)
+    positive_mask = mu_full > 1e-5
+    if not positive_mask.any():
+        return np.ones(len(factor_panels)) / len(factor_panels)
+
+    ic_pos = ic_matrix.loc[:, positive_mask]
+    mu = ic_pos.mean(axis=0).values  # shape (K_pos,)
+    Sigma = np.cov(ic_pos.values, rowvar=False)  # shape (K_pos, K_pos)
+    lam = 1e-3
+    Sigma_reg = Sigma + lam * np.eye(Sigma.shape[0])
+
+    try:
+        w_raw = np.linalg.solve(Sigma_reg, mu)
+    except np.linalg.LinAlgError:
+        # fallback to equal weight
+        return np.ones(len(factor_panels)) / len(factor_panels)
+
+    # Normalize to sum to 1 (weights can be negative, but we expect positive due to positive mu)
+    w = w_raw / np.sum(w_raw)
+
+    # Map back to full factor list, zero weight for excluded factors
+    full_weights = np.zeros(len(factor_panels))
+    pos_indices = np.where(positive_mask)[0]
+    full_weights[pos_indices] = w
+
+    return full_weights
 
 
 def combine_icir_weight(factor_panels: list[pd.DataFrame], weights: np.ndarray) -> pd.DataFrame:
