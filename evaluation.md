@@ -222,4 +222,5 @@ Agent accept/revert 依据 primary_score 在 val 段的分数。test 段由 `jud
 
 **Score 公式的合理性由 §13 异常熔断机制兜底**（详见 `program.md` §13）：
 若 score REJECTED 但底层指标显著改善（Sharpe > +30% / MDD 改善 > 20% / 年化 > +30%），
-runner 会打出 `⚠ SCORE_ANOMALY` 标记，提示人类介入检查公式设计。
+runner 会打出 `⚠ SCORE_ANOMALY` 标记。在线服务在 24/7 模式下不会暂停等待人工，而是自动调用 LLM
+总结异常原因，把 avoid/prefer 模式和组件更新建议写入连续记忆，并在下一轮 proposal gate 中使用这些约束。

@@ -48,6 +48,7 @@ DEFAULT_CONFIG: dict[str, Any] = {
     "iteration_sleep_sec": 5,
     "auto_commit_accepted": False,
     "memory_enabled": True,
+    "auto_review_score_anomaly": True,
     "enabled": False,
 }
 
@@ -104,6 +105,8 @@ def default_memory() -> dict[str, Any]:
         "avoid": [],
         "promising": [],
         "recent": [],
+        "anomaly_reviews": [],
+        "anomaly_guidance": "",
     }
 
 
@@ -198,6 +201,49 @@ def load_memory() -> dict[str, Any]:
         if seeded.get("summary") != base.get("summary"):
             save_memory(seeded)
             return seeded
+    best_rec = current_best_record()
+    if best_rec and (
+        not base.get("best_known")
+        or float(best_rec.get("score") or float("-inf")) > float((base.get("best_known") or {}).get("score") or float("-inf"))
+    ):
+        base["best_known"] = {
+            "runner_iter": best_rec.get("iter_id"),
+            "score": best_rec.get("score"),
+            "summary": "Synced from journal/best.json current baseline.",
+            "factor_library": best_rec.get("factor_library"),
+        }
+        base["summary"] = (
+            f"Synced to current baseline runner#{best_rec.get('iter_id')} "
+            f"score={best_rec.get('score')}; continue 24/7 iteration from this best."
+        )
+        save_memory(base)
+        return base
+    if not base.get("anomaly_reviews"):
+        anomalies = [
+            {
+                "runner_iter": r.get("iter_id"),
+                "score": r.get("score"),
+                "decision": r.get("decision") or r.get("status"),
+                "score_anomaly": r.get("score_anomaly"),
+                "summary": "Seeded historical score_anomaly; future events are auto-reviewed instead of pausing.",
+            }
+            for r in current_runs
+            if r.get("score_anomaly")
+        ][-8:]
+        if anomalies:
+            base["anomaly_reviews"] = anomalies
+            base["anomaly_guidance"] = (
+                "Historical score_anomaly events exist. In 24/7 mode, treat isolated drawdown improvement "
+                "as insufficient when score, Sharpe, return or IC degrade materially; auto-review and continue."
+            )
+    if "pause" in str(base.get("summary", "")).lower() or "等待" in str(base.get("summary", "")):
+        best = base.get("best_known") or {}
+        base["summary"] = (
+            f"24/7 mode active from baseline runner#{best.get('runner_iter')} score={best.get('score')}; "
+            "score_anomaly now triggers auto-review and memory updates, not a human-wait pause."
+        )
+        save_memory(base)
+        return base
     return base
 
 
@@ -214,6 +260,8 @@ def seed_memory_from_journal(memory: dict[str, Any]) -> dict[str, Any]:
         memory["avoid"] = []
         memory["promising"] = []
         memory["recent"] = []
+        memory["anomaly_reviews"] = []
+        memory["anomaly_guidance"] = ""
         memory["score_version"] = current_score_version
         return memory
     accepted = [r for r in runs if r.get("decision") == "ACCEPTED"]
@@ -232,6 +280,16 @@ def seed_memory_from_journal(memory: dict[str, Any]) -> dict[str, Any]:
             "score_anomaly": run.get("score_anomaly"),
         })
     memory["recent"] = recent_items
+    memory["anomaly_reviews"] = [
+        {
+            "runner_iter": r.get("iter_id"),
+            "score": r.get("score"),
+            "decision": r.get("decision") or r.get("status"),
+            "score_anomaly": r.get("score_anomaly"),
+        }
+        for r in runs
+        if r.get("score_anomaly")
+    ][-8:]
     if best:
         memory["best_known"] = {
             "runner_iter": best.get("iter_id"),
@@ -284,6 +342,8 @@ def memory_prompt_text(memory: dict[str, Any]) -> str:
         "best_known": memory.get("best_known"),
         "avoid": memory.get("avoid", [])[-12:],
         "promising": memory.get("promising", [])[-12:],
+        "anomaly_guidance": memory.get("anomaly_guidance", ""),
+        "anomaly_reviews": memory.get("anomaly_reviews", [])[-5:],
         "recent": recent,
     }, ensure_ascii=False, indent=2)
 
@@ -539,6 +599,7 @@ def update_memory_after_iteration(
     iteration: int,
     proposal: dict[str, Any],
     rec: dict[str, Any] | None,
+    anomaly_review: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     memory = load_memory()
     run = rec or {}
@@ -555,6 +616,7 @@ def update_memory_after_iteration(
         "selected_proposal": proposal.get("selected_proposal"),
         "error": run.get("error"),
         "score_anomaly": run.get("score_anomaly"),
+        "anomaly_review": anomaly_review,
     }
     recent = memory.get("recent", [])
     recent.append(item)
@@ -573,7 +635,40 @@ def update_memory_after_iteration(
     elif run.get("decision") == "REJECTED":
         memory["avoid"] = (memory.get("avoid", []) + [short_memory_line(item)])[-12:]
     if run.get("score_anomaly"):
-        memory["summary"] = "Recent run triggered score_anomaly; pause score-only optimization and consider product-quality metrics before similar horizon/score tradeoff experiments."
+        if anomaly_review:
+            review_item = {
+                "ts": now_iso(),
+                "service_iteration": iteration,
+                "runner_iter": run.get("iter_id"),
+                "score": score,
+                "decision": decision,
+                "score_anomaly": run.get("score_anomaly"),
+                "summary": anomaly_review.get("summary"),
+                "root_cause": anomaly_review.get("root_cause"),
+                "next_guidance": anomaly_review.get("next_guidance"),
+                "component_updates": anomaly_review.get("component_updates"),
+                "avoid_patterns": anomaly_review.get("avoid_patterns"),
+            }
+            reviews = memory.get("anomaly_reviews", [])
+            reviews.append(review_item)
+            memory["anomaly_reviews"] = reviews[-12:]
+            guidance_parts = [
+                str(anomaly_review.get("next_guidance") or "").strip(),
+                "Avoid patterns: " + "; ".join(str(x) for x in anomaly_review.get("avoid_patterns", [])[:5])
+                if isinstance(anomaly_review.get("avoid_patterns"), list) else "",
+            ]
+            memory["anomaly_guidance"] = " ".join(part for part in guidance_parts if part)[-1600:]
+            for avoid in anomaly_review.get("avoid_patterns", []) if isinstance(anomaly_review.get("avoid_patterns"), list) else []:
+                memory["avoid"] = (memory.get("avoid", []) + [f"score_anomaly runner#{run.get('iter_id')}: {avoid}"])[-12:]
+            memory["summary"] = (
+                f"Score anomaly on runner#{run.get('iter_id')} was auto-reviewed; "
+                "continue 24/7 iteration using anomaly_guidance instead of pausing."
+            )
+        else:
+            memory["summary"] = (
+                f"Score anomaly on runner#{run.get('iter_id')} was recorded; continue 24/7 "
+                "without pausing, but avoid repeating that rejected pattern."
+            )
     elif memory.get("best_known"):
         best = memory["best_known"]
         memory["summary"] = f"Best remembered run #{best.get('runner_iter')} score={best.get('score')}; avoid repeating recent rejected/crashed variants."
@@ -895,6 +990,125 @@ current alpha.py:
     return [{"role": "system", "content": system}, {"role": "user", "content": user}]
 
 
+def build_score_anomaly_review_prompt(
+    ctx: dict[str, Any],
+    proposal: dict[str, Any],
+    rec: dict[str, Any],
+    runner_tail: str,
+) -> list[dict[str, str]]:
+    system = (
+        "You are the AutoAlpha 24/7 research supervisor. "
+        "A runner iteration triggered score_anomaly. Do not write code. "
+        "Diagnose why the anomaly happened and produce operational guidance for the next loop. "
+        "Return strict JSON only."
+    )
+    user = f"""
+AutoAlpha must run unattended 24/7. A rejected run triggered score_anomaly, so we need an automatic review instead of waiting for a human.
+
+Return a JSON object with these keys:
+- summary: concise Chinese summary.
+- root_cause: likely reason the score_anomaly fired.
+- should_continue: true unless there is clear data leakage or infrastructure corruption.
+- next_guidance: concrete guidance for the next proposal gate and implementation prompt.
+- component_updates: list of suggested updates to service memory/proposal gate/evaluation notes/factor grammar. These are advisory memory updates, not direct file edits.
+- avoid_patterns: list of patterns the next proposals should avoid.
+- prefer_patterns: list of patterns the next proposals should prefer.
+
+Current baseline / bottleneck:
+{json.dumps(ctx.get("bottleneck"), ensure_ascii=False, indent=2)}
+
+Persistent memory:
+{memory_prompt_text(ctx.get("memory", {}))}
+
+Selected proposal that led to the anomaly:
+{json.dumps(proposal.get("selected_proposal") or proposal, ensure_ascii=False, indent=2)}
+
+Runner record:
+{json.dumps(rec, ensure_ascii=False, indent=2)}
+
+Runner output tail:
+{runner_tail[-4000:]}
+
+Rules:
+- If the anomaly is only "MDD improved but score is still much worse", do not stop the service.
+- If score, Sharpe, annual_return and IC are all worse except one isolated risk metric, mark it as a low-quality anomaly and guide the next loop away from that pattern.
+- If there is any hint of leakage, invalid data, or repeated infrastructure failure, set should_continue=false and explain.
+- Keep guidance compatible with program.md and evaluation.md.
+"""
+    return [{"role": "system", "content": system}, {"role": "user", "content": user}]
+
+
+def fallback_score_anomaly_review(rec: dict[str, Any], proposal: dict[str, Any], error: str | None = None) -> dict[str, Any]:
+    anomaly = rec.get("score_anomaly") or {}
+    triggers = anomaly.get("triggers") or []
+    return {
+        "summary": "score_anomaly 已自动记录；本次不暂停服务，下一轮避开导致综合 score 明显下降的方向。",
+        "root_cause": anomaly.get("message") or error or "Runner flagged an anomaly but no model review was available.",
+        "should_continue": True,
+        "next_guidance": (
+            "Continue from current best. Treat isolated drawdown improvement as insufficient when Sharpe, return, "
+            "IC or score degrade materially; prefer proposals that improve efficiency without collapsing predictive quality."
+        ),
+        "component_updates": [
+            "memory.anomaly_reviews append fallback review",
+            "proposal_gate penalize variants similar to the rejected anomaly proposal",
+        ],
+        "avoid_patterns": [
+            "单独优化回撤但显著牺牲 Sharpe/annual_return/IC",
+            "重复提交与上一个 score_anomaly proposal 相似的改动",
+            *(str(x) for x in triggers[:3]),
+        ],
+        "prefer_patterns": [
+            "保持 #0224 best 的低换手和高 Sharpe 特征",
+            "优先提高 year_stability 与 excess_efficiency，不破坏 rank_ic_ir",
+        ],
+        "review_error": error,
+        "selected_summary": proposal.get("summary"),
+    }
+
+
+def review_score_anomaly(
+    cfg: dict[str, Any],
+    ctx: dict[str, Any],
+    proposal: dict[str, Any],
+    rec: dict[str, Any],
+    runner_tail: str,
+) -> dict[str, Any]:
+    if not cfg.get("auto_review_score_anomaly", True):
+        return fallback_score_anomaly_review(rec, proposal, "auto_review_score_anomaly disabled")
+    try:
+        messages = build_score_anomaly_review_prompt(ctx, proposal, rec, runner_tail)
+        append_log("research", "score_anomaly_review_context_built", {
+            "runner_iter": rec.get("iter_id"),
+            "score": rec.get("score"),
+            "message_count": len(messages),
+            "score_anomaly": rec.get("score_anomaly"),
+        })
+        review = call_openai_compatible(cfg, messages)
+        if not isinstance(review, dict):
+            raise RuntimeError("Review response was not a JSON object.")
+        review.setdefault("should_continue", True)
+        review.setdefault("summary", "score_anomaly auto-reviewed.")
+        review.setdefault("avoid_patterns", [])
+        review.setdefault("prefer_patterns", [])
+        review.setdefault("component_updates", [])
+        append_log("research", "score_anomaly_auto_reviewed", {
+            "runner_iter": rec.get("iter_id"),
+            "score": rec.get("score"),
+            "review": review,
+        })
+        return review
+    except Exception as exc:
+        review = fallback_score_anomaly_review(rec, proposal, f"{type(exc).__name__}: {exc}")
+        append_log("research", "score_anomaly_auto_review_failed", {
+            "runner_iter": rec.get("iter_id"),
+            "score": rec.get("score"),
+            "error": review.get("review_error"),
+            "fallback_review": review,
+        })
+        return review
+
+
 def normalize_base_url(base_url: str) -> str:
     base = base_url.strip().rstrip("/")
     if base.endswith("/v1"):
@@ -1073,19 +1287,21 @@ def one_iteration() -> bool:
         "runner_tail": output[-4000:],
         "run_record": rec,
     })
-    if cfg.get("memory_enabled", True):
-        update_memory_after_iteration(iteration, proposal, rec)
+    anomaly_review = None
     if rec and rec.get("score_anomaly"):
-        append_log("audit", "paused_for_score_anomaly", {
+        with STATE_LOCK:
+            RUNTIME["status"] = "reviewing_score_anomaly"
+        anomaly_review = review_score_anomaly(cfg, ctx, proposal, rec, output[-4000:])
+        append_log("audit", "score_anomaly_reviewed_continue", {
             "iteration": iteration,
             "score": rec.get("score"),
             "decision": rec.get("decision"),
             "score_anomaly": rec.get("score_anomaly"),
+            "should_continue": anomaly_review.get("should_continue", True),
+            "summary": anomaly_review.get("summary"),
         })
-        with STATE_LOCK:
-            RUNTIME["status"] = "waiting_for_human_score_anomaly"
-            RUNTIME["last_finished_at"] = now_iso()
-        return False
+    if cfg.get("memory_enabled", True):
+        update_memory_after_iteration(iteration, proposal, rec, anomaly_review=anomaly_review)
     maybe_git_commit(cfg, rec)
     with STATE_LOCK:
         RUNTIME["status"] = "sleeping"
@@ -1134,8 +1350,7 @@ def loop_main() -> None:
         final_status = RUNTIME["status"]
         RUNTIME["running"] = False
         RUNTIME["stop_requested"] = False
-        if final_status not in {"waiting_for_human_score_anomaly"}:
-            RUNTIME["status"] = "idle"
+        RUNTIME["status"] = "idle"
     append_log("audit", "loop_stopped", {})
 
 
@@ -1383,6 +1598,7 @@ INDEX_HTML = r"""<!doctype html>
         replacing_alpha: 'replace',
         evaluating: 'evaluate',
         recording_delivery: 'deliver',
+        reviewing_score_anomaly: 'deliver',
         sleeping: 'loop',
         stopping: 'loop',
         error_sleeping: 'loop',
@@ -1399,6 +1615,7 @@ INDEX_HTML = r"""<!doctype html>
         if (step === active) node.classList.add('active');
         if (status === 'waiting_for_api_config' && step === 'config') node.classList.add('wait');
         if (status === 'waiting_for_human_score_anomaly' && step === 'loop') node.classList.add('wait');
+        if (status === 'reviewing_score_anomaly' && step === 'deliver') node.classList.add('wait');
         if (status === 'error_sleeping' && step === 'loop') node.classList.add('error');
       });
       const labels = {
@@ -1409,10 +1626,11 @@ INDEX_HTML = r"""<!doctype html>
         replacing_alpha: '正在备份旧版并写入模型生成的 alpha.py。',
         evaluating: '正在运行 runner.py once，等待 score 和回测指标。',
         recording_delivery: '正在写入交付日志并刷新 score 曲线。',
+        reviewing_score_anomaly: '发现 score anomaly，正在自动调用模型复盘并更新连续记忆。',
         sleeping: '本轮已交付，等待下一轮迭代间隔。',
         stopping: '正在停止后台循环。',
         error_sleeping: '上一轮出错，服务短暂停顿后可复查日志。',
-        waiting_for_human_score_anomaly: '发现 score anomaly，已暂停等待人工复核。'
+        waiting_for_human_score_anomaly: '旧状态：发现 score anomaly 后等待人工复核。当前版本会自动复盘后继续。'
       };
       $('flowStatus').textContent = labels[status] || `当前状态：${status}`;
       $('flowPill').textContent = status;
@@ -1618,6 +1836,15 @@ INDEX_HTML = r"""<!doctype html>
       }
       if (rec.kind === 'audit' && rec.event === 'paused_for_score_anomaly') {
         return { title: `因 score anomaly 暂停`, summary: p.score_anomaly?.message || 'score 与底层指标背离，等待人工复核。', chips: [`score ${fmt(Number(p.score))}`, p.decision || '--'] };
+      }
+      if (rec.kind === 'audit' && rec.event === 'score_anomaly_reviewed_continue') {
+        return { title: `score anomaly 已自动复盘`, summary: p.summary || p.score_anomaly?.message || '已写入记忆并继续下一轮。', chips: [`score ${fmt(Number(p.score))}`, p.decision || '--', p.should_continue === false ? 'review warned' : 'continue'] };
+      }
+      if (rec.kind === 'research' && rec.event === 'score_anomaly_auto_reviewed') {
+        return { title: `异常复盘完成`, summary: p.review?.summary || p.review?.root_cause || '', chips: [`runner #${p.runner_iter}`, `score ${fmt(Number(p.score))}`] };
+      }
+      if (rec.kind === 'research' && rec.event === 'score_anomaly_auto_review_failed') {
+        return { title: `异常复盘使用 fallback`, summary: p.error || '', chips: [`runner #${p.runner_iter}`, 'continue'] };
       }
       return {
         title: rec.event || rec.kind,
