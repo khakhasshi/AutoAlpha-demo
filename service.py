@@ -79,9 +79,15 @@ def ensure_state() -> None:
 
 
 def default_memory() -> dict[str, Any]:
+    try:
+        import prepare
+        score_version = getattr(prepare, "SCORE_VERSION", "demo_v1")
+    except Exception:
+        score_version = "demo_v1"
     return {
         "created_at": now_iso(),
         "updated_at": None,
+        "score_version": score_version,
         "summary": "No service iterations have been memorized yet.",
         "best_known": None,
         "avoid": [],
@@ -158,17 +164,46 @@ def load_memory() -> dict[str, Any]:
         data = default_memory()
     base = default_memory()
     base.update(data)
+    try:
+        import prepare
+        current_score_version = getattr(prepare, "SCORE_VERSION", "demo_v1")
+    except Exception:
+        current_score_version = "demo_v1"
+    if base.get("score_version") and base.get("score_version") != current_score_version:
+        seeded = seed_memory_from_journal(default_memory())
+        save_memory(seeded)
+        return seeded
+    current_runs = [r for r in journal_runs(limit=200) if r.get("score_version", "demo_v1") == current_score_version]
+    has_memory_items = bool(base.get("best_known") or base.get("recent") or base.get("avoid") or base.get("promising"))
+    if not current_runs and has_memory_items:
+        seeded = seed_memory_from_journal(default_memory())
+        save_memory(seeded)
+        return seeded
     if not base.get("recent") and not base.get("updated_at"):
         seeded = seed_memory_from_journal(base)
         if seeded.get("recent"):
+            save_memory(seeded)
+            return seeded
+        if seeded.get("summary") != base.get("summary"):
             save_memory(seeded)
             return seeded
     return base
 
 
 def seed_memory_from_journal(memory: dict[str, Any]) -> dict[str, Any]:
-    runs = journal_runs(limit=80)
+    try:
+        import prepare
+        current_score_version = getattr(prepare, "SCORE_VERSION", "demo_v1")
+    except Exception:
+        current_score_version = "demo_v1"
+    runs = [r for r in journal_runs(limit=200) if r.get("score_version", "demo_v1") == current_score_version]
     if not runs:
+        memory["summary"] = f"No {current_score_version} service iterations have been memorized yet."
+        memory["best_known"] = None
+        memory["avoid"] = []
+        memory["promising"] = []
+        memory["recent"] = []
+        memory["score_version"] = current_score_version
         return memory
     accepted = [r for r in runs if r.get("decision") == "ACCEPTED"]
     best = max(accepted, key=lambda r: r.get("score") or float("-inf"), default=None)
@@ -209,11 +244,12 @@ def seed_memory_from_journal(memory: dict[str, Any]) -> dict[str, Any]:
     ][-12:]
     if best:
         memory["summary"] = (
-            f"Seeded from journal: best accepted runner#{best.get('iter_id')} "
+            f"Seeded from {current_score_version} journal: best accepted runner#{best.get('iter_id')} "
             f"score={best.get('score')}. Avoid repeating recent rejected/crashed variants."
         )
     else:
-        memory["summary"] = "Seeded from journal, but no accepted run found yet."
+        memory["summary"] = f"Seeded from {current_score_version} journal, but no accepted run found yet."
+    memory["score_version"] = current_score_version
     return memory
 
 
@@ -365,8 +401,14 @@ def score_series() -> list[dict[str, Any]]:
     path = ROOT / "journal" / "runs.jsonl"
     if not path.exists():
         return []
+    try:
+        import prepare
+        current_score_version = getattr(prepare, "SCORE_VERSION", "demo_v1")
+    except Exception:
+        current_score_version = "demo_v1"
     rows = []
     best = float("-inf")
+    active_score_version = None
     for line in path.read_text(encoding="utf-8").splitlines():
         if not line.strip():
             continue
@@ -375,6 +417,14 @@ def score_series() -> list[dict[str, Any]]:
         except Exception:
             continue
         score = rec.get("score")
+        score_version = rec.get("score_version", "demo_v1")
+        if score_version != current_score_version:
+            continue
+        if active_score_version is None:
+            active_score_version = score_version
+        elif score_version != active_score_version:
+            active_score_version = score_version
+            best = float("-inf")
         if isinstance(score, int | float):
             best = max(best, float(score))
             best_score = best
@@ -384,6 +434,7 @@ def score_series() -> list[dict[str, Any]]:
             "iter_id": rec.get("iter_id"),
             "ts": rec.get("ts"),
             "score": score,
+            "score_version": score_version,
             "best_score": best_score,
             "decision": rec.get("decision"),
             "status": rec.get("status"),
@@ -406,6 +457,7 @@ def journal_runs(limit: int = 80) -> list[dict[str, Any]]:
         return []
     rows = []
     best = float("-inf")
+    active_score_version = None
     for line in path.read_text(encoding="utf-8").splitlines():
         if not line.strip():
             continue
@@ -414,6 +466,12 @@ def journal_runs(limit: int = 80) -> list[dict[str, Any]]:
         except Exception:
             continue
         score = rec.get("score")
+        score_version = rec.get("score_version", "demo_v1")
+        if active_score_version is None:
+            active_score_version = score_version
+        elif score_version != active_score_version:
+            active_score_version = score_version
+            best = float("-inf")
         if isinstance(score, int | float):
             prev_best = None if best == float("-inf") else best
             is_new_best = score > best
@@ -430,6 +488,7 @@ def journal_runs(limit: int = 80) -> list[dict[str, Any]]:
             "status": rec.get("status"),
             "decision": rec.get("decision"),
             "score": score,
+            "score_version": score_version,
             "best_score": best_score,
             "delta_to_previous_best": delta_to_best,
             "is_new_best": is_new_best,
@@ -1099,6 +1158,7 @@ INDEX_HTML = r"""<!doctype html>
         [
           `score ${fmt(Number(run.score))}`,
           `best ${fmt(Number(run.best_score))}`,
+          run.score_version || '--',
           `H ${run.horizon ?? '--'}`,
           `turnover ${fmt(Number(run.annual_turnover), 1)}`,
           `mdd ${pct(run.max_drawdown)}`,
@@ -1127,6 +1187,7 @@ INDEX_HTML = r"""<!doctype html>
       const chips = $('memoryChips');
       chips.innerHTML = '';
       [
+        memory.score_version || 'score_version --',
         `recent ${memory.recent?.length || 0}`,
         `avoid ${memory.avoid?.length || 0}`,
         `promising ${memory.promising?.length || 0}`,
@@ -1262,7 +1323,7 @@ INDEX_HTML = r"""<!doctype html>
       $('latestScore').textContent = fmt(Number(latest.score));
       $('bestScore').textContent = fmt(best);
       $('iterCount').textContent = String(rows.length);
-      $('chartSubtitle').textContent = `latest: #${latest.iter_id} ${latest.decision || latest.status || ''} · horizon=${latest.horizon ?? '--'} · sharpe=${fmt(Number(latest.sharpe), 3)}`;
+      $('chartSubtitle').textContent = `latest: #${latest.iter_id} ${latest.decision || latest.status || ''} · ${latest.score_version || '--'} · horizon=${latest.horizon ?? '--'} · sharpe=${fmt(Number(latest.sharpe), 3)}`;
       const xs = rows.map(r => Number(r.iter_id)).filter(Number.isFinite);
       const ys = valid.flatMap(r => [Number(r.score), Number(r.best_score)]).filter(Number.isFinite);
       const minX = Math.min(...xs), maxX = Math.max(...xs);

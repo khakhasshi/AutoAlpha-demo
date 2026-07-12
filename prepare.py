@@ -403,7 +403,7 @@ class BacktestResult:
     max_drawdown: float     # 负数
     annual_turnover: float  # 单边换手 / 年（×2 即双边）
     n_days: int
-    # —— benchmark / excess（仅展示，不进 score）——
+    # —— benchmark / excess（trade_v2 会用于 score 与诊断）——
     benchmark_nav: pd.Series = field(default_factory=lambda: pd.Series(dtype=float))
     benchmark_daily_ret: pd.Series = field(default_factory=lambda: pd.Series(dtype=float))
     excess_nav: pd.Series = field(default_factory=lambda: pd.Series(dtype=float))
@@ -694,12 +694,11 @@ def compute_group_monotonicity(
 # 8. 主分（runner 唯一引用）
 #
 #   设计动机：
-#   v1 公式权重 1.0*IC_IR 让单一指标主导（典型 ~85% 的总分由 IC_IR 贡献），
-#   导致"刷 IC 不顾 Sharpe / MDD / 年化收益"的因子也能赢。
-#   教学版仅使用 IC 三项，学员可自行扩展加入 Sharpe / MDD 等。
-#   每个分量先归一到 [-2, +2] 量级再加权 —— 权重数字本身就是"重要性比例"。
+#   demo_v1 只看 IC，容易让"刷 IC 不顾 Sharpe / MDD / 年化收益"的因子赢。
+#   trade_v2 保留 IC 作为预测能力底座，同时把超额收益、回撤和换手纳入主分。
+#   大尺度分量先 clip 到可比范围再加权 —— 权重数字本身就是"重要性比例"。
 # =============================================================================
-SCORE_VERSION: str = "demo_v1"
+SCORE_VERSION: str = "trade_v2"
 
 
 @dataclass
@@ -729,7 +728,7 @@ class ScoreReport:
     # 公式各分量贡献（便于诊断哪一项在拉分）
     score_breakdown: dict
     score_version: str
-    # 超额指标（vs 中证 1000，仅展示，不进 score）
+    # 超额指标（vs 中证 1000；trade_v2 会进入 score）
     excess_annual_return: float = float("nan")
     excess_sharpe: float = float("nan")
     excess_max_drawdown: float = float("nan")
@@ -742,18 +741,30 @@ def primary_score(
     label_kind: LabelKind = "market_neutral",
 ) -> ScoreReport:
     """
-    主分 · 教学版（demo v1 · IC 三项组合）
+    主分 · 交易版（trade v2 · IC + 超额收益质量）
     ================================================================
-    专注 IC 类指标，让学员看清 “Agent 是在优化预测信号本身”。
-    Sharpe / 年化 / 回撤 / 单调性 / 换手率仍会计算并展示，但不进 score。
-    学员之后可以自己把这些指标加进公式，观察分数如何变化。
+    v1 只看 IC，容易出现“排序能力强但多头回测很差”的高分解。
+    v2 保留 IC 作为预测能力底座，同时把超额 Sharpe、年化收益、回撤和换手
+    纳入主分，让 agent 朝更可交易的方向优化。
 
-    score = 1.0 * rank_ic_ir  +  10.0 * pearson_ic_mean  +  10.0 * rank_ic_mean
+    score =
+        0.35 * rank_ic_ir
+      + 4.00 * rank_ic_mean
+      + 2.00 * pearson_ic_mean
+      + 1.25 * clip(excess_sharpe, -3, 3)
+      + 0.75 * clip(sharpe, -3, 3)
+      + 2.00 * clip(excess_annual_return, -0.50, 0.50)
+      + 1.00 * clip(annual_return, -0.50, 0.50)
+      + 1.50 * clip(1 + excess_max_drawdown / 0.30, -2, 1)
+      + 0.75 * clip(1 + max_drawdown / 0.50, -2, 1)
+      + 0.50 * monotonicity
+      - 0.35 * clip(annual_turnover / 50 - 1, 0, 4)
 
-    含义：
-      - rank_ic_ir       稳定性（IC 均值 / 标准差 · 年化因子）· 主项
-      - pearson_ic_mean  截面强度（原始值相关性均值）· 辅项
-      - rank_ic_mean     截面单调（排序相关性均值）· 辅项
+    说明：
+      - IC 项仍然奖励稳定预测能力，但权重降低；
+      - 超额指标优先于绝对多头指标，降低市场 beta 对评分的污染；
+      - 回撤项在 max_drawdown = 0 时给正分，在 -30%/-50% 附近归零；
+      - 年换手超过 50 后开始惩罚，抑制 H=1 高频换手解。
     """
     validate_signal(signal, "primary_score.signal")
 
@@ -776,7 +787,7 @@ def primary_score(
         if pearson_ic_std and pearson_ic_std > 0 else float("nan")
     )
 
-    # ---- 展示用指标（不进 score，供 runs.jsonl / 因子卡 / 学员自己扩展公式时使用）----
+    # ---- 回测指标（trade_v2 会进入 score）----
     mono, _ = compute_group_monotonicity(signal, labels, n_groups=10)
     bt = backtest(signal, panel, horizon=horizon)
 
@@ -784,15 +795,34 @@ def primary_score(
     def _s(x):
         return 0.0 if (x is None or (isinstance(x, float) and np.isnan(x))) else float(x)
 
+    def _clip(x, lo, hi):
+        return float(np.clip(_s(x), lo, hi))
+
     rank_ir_v = _s(rank_ic_ir)
     rank_ic_mean_v = _s(rank_ic_mean)
     pearson_ic_mean_v = _s(pearson_ic_mean)
+    excess_sharpe_v = _clip(getattr(bt, "excess_sharpe", float("nan")), -3.0, 3.0)
+    sharpe_v = _clip(bt.sharpe, -3.0, 3.0)
+    excess_ret_v = _clip(getattr(bt, "excess_annual_return", float("nan")), -0.50, 0.50)
+    annual_ret_v = _clip(bt.annual_return, -0.50, 0.50)
+    excess_mdd_quality_v = _clip(1.0 + _s(getattr(bt, "excess_max_drawdown", float("nan"))) / 0.30, -2.0, 1.0)
+    mdd_quality_v = _clip(1.0 + _s(bt.max_drawdown) / 0.50, -2.0, 1.0)
+    monotonicity_v = _clip(mono, -1.0, 1.0)
+    turnover_penalty_v = _clip(_s(bt.annual_turnover) / 50.0 - 1.0, 0.0, 4.0)
 
-    # ---- 教学版分数公式 ----
+    # ---- 交易版分数公式 ----
     parts = {
-        "rank_ic_ir_term":       1.0  * rank_ir_v,
-        "pearson_ic_mean_term":  10.0 * pearson_ic_mean_v,
-        "rank_ic_mean_term":     10.0 * rank_ic_mean_v,
+        "rank_ic_ir_term":          0.35 * rank_ir_v,
+        "rank_ic_mean_term":        4.00 * rank_ic_mean_v,
+        "pearson_ic_mean_term":     2.00 * pearson_ic_mean_v,
+        "excess_sharpe_term":       1.25 * excess_sharpe_v,
+        "sharpe_term":              0.75 * sharpe_v,
+        "excess_return_term":       2.00 * excess_ret_v,
+        "annual_return_term":       1.00 * annual_ret_v,
+        "excess_mdd_quality_term":  1.50 * excess_mdd_quality_v,
+        "mdd_quality_term":         0.75 * mdd_quality_v,
+        "monotonicity_term":        0.50 * monotonicity_v,
+        "turnover_penalty_term":   -0.35 * turnover_penalty_v,
     }
     score = sum(parts.values())
 
@@ -801,23 +831,36 @@ def primary_score(
             "rank_ic_ir":       rank_ir_v,
             "rank_ic_mean":     rank_ic_mean_v,
             "pearson_ic_mean":  pearson_ic_mean_v,
-            # 下列指标不进 score，仅展示（学员可自行扩展公式使用）：
+            # trade_v2 中下列回测指标会参与 score；同时保留 raw 值便于诊断：
             "sharpe":           _s(bt.sharpe),
             "annual_return":    _s(bt.annual_return),
             "max_drawdown":     _s(bt.max_drawdown),
             "monotonicity":     _s(mono),
             "annual_turnover":  _s(bt.annual_turnover),
+            "excess_annual_return": _s(getattr(bt, "excess_annual_return", float("nan"))),
+            "excess_sharpe":        _s(getattr(bt, "excess_sharpe", float("nan"))),
+            "excess_max_drawdown":  _s(getattr(bt, "excess_max_drawdown", float("nan"))),
+            "excess_mdd_quality":   excess_mdd_quality_v,
+            "mdd_quality":          mdd_quality_v,
+            "turnover_penalty":     turnover_penalty_v,
         },
         "weighted": parts,
         "weights": {
-            "rank_ic_ir":       1.0,
-            "pearson_ic_mean":  10.0,
-            "rank_ic_mean":     10.0,
+            "rank_ic_ir":          0.35,
+            "rank_ic_mean":        4.00,
+            "pearson_ic_mean":     2.00,
+            "excess_sharpe":       1.25,
+            "sharpe":              0.75,
+            "excess_annual_return": 2.00,
+            "annual_return":       1.00,
+            "excess_mdd_quality":  1.50,
+            "mdd_quality":         0.75,
+            "monotonicity":        0.50,
+            "turnover_penalty":   -0.35,
         },
         "note": (
-            "demo v1 教学版：score = 1.0*rank_ic_ir + 10.0*pearson_ic_mean + 10.0*rank_ic_mean。"
-            "Sharpe / 年化 / 回撤 / 单调性 / 换手率仅展示，不进 score。"
-            "学员可在 prepare.primary_score 里自行扩展公式。"
+            "trade v2：score 同时考虑 IC、超额 Sharpe、年化收益、回撤质量、单调性与换手惩罚。"
+            "目标是减少高 IC 但多头/超额回测很差的解。"
         ),
     }
 
@@ -856,8 +899,8 @@ if __name__ == "__main__":
     print(f"\n[prepare] trading calendar loaded: {len(cal)} days "
           f"({cal[0].date()} → {cal[-1].date()})")
 
-    print(f"\n[prepare] score formula (demo_v1): "
-          f"1.0 * rank_ic_ir + 10.0 * pearson_ic_mean + 10.0 * rank_ic_mean")
+    print(f"\n[prepare] score formula ({SCORE_VERSION}): "
+          f"IC + excess Sharpe + return + drawdown quality - turnover penalty")
 
     bench = load_benchmark_series()
     print(f"[prepare] benchmark loaded: {bench.notna().sum()}/{len(bench)} non-NaN days "
@@ -895,7 +938,7 @@ if __name__ == "__main__":
     print(f"  max_drawdown     : {rpt.max_drawdown:+.4%}")
     print(f"  ann_turnover     : {rpt.annual_turnover:.2f}")
     print(f"  n_days           : {rpt.n_days}")
-    print(f"  ---- 超额（vs 中证 1000，仅展示不进 score）----")
+    print(f"  ---- 超额（vs 中证 1000；trade_v2 score components）----")
     print(f"  excess_ret       : {rpt.excess_annual_return:+.4%}")
     print(f"  excess_sharpe    : {rpt.excess_sharpe:+.4f}")
     print(f"  excess_mdd       : {rpt.excess_max_drawdown:+.4%}")

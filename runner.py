@@ -401,7 +401,7 @@ def evaluate_once(iter_id: int) -> tuple[dict[str, Any], dict[str, Any]]:
             "max_drawdown": rpt.max_drawdown,
             "annual_turnover": rpt.annual_turnover,
             "n_days": rpt.n_days,
-            # 超额（vs 中证 1000；不进 score，仅展示与诊断）
+            # 超额（vs 中证 1000；trade_v2 会进入 score）
             "excess_annual_return": getattr(rpt, "excess_annual_return", float("nan")),
             "excess_sharpe":         getattr(rpt, "excess_sharpe", float("nan")),
             "excess_max_drawdown":   getattr(rpt, "excess_max_drawdown", float("nan")),
@@ -527,10 +527,17 @@ def run_once() -> dict[str, Any]:
     iter_id = _next_iter_id()
     print(f"\n=== run #{iter_id} (best so far: {best['score']:+.4f}) ===")
     rec, artifacts = evaluate_once(iter_id)
+    rec_score_version = rec.get("score_version", "demo_v1")
+    best_score_version = best.get("score_version", "demo_v1")
+    version_reset = rec["status"] == "ok" and rec_score_version != best_score_version
+    compare_best_score = float("-inf") if version_reset else best["score"]
+    if version_reset:
+        print(f"  score_version changed: {best_score_version} -> {rec_score_version}; "
+              "starting a new best epoch.")
 
-    if rec["status"] == "ok" and rec["score"] > best["score"]:
+    if rec["status"] == "ok" and rec["score"] > compare_best_score:
         snap = _snapshot_alpha(iter_id, rec["score"])
-        prev_best_score = best["score"]
+        prev_best_score = compare_best_score
         best.update({
             "score": rec["score"],
             "snapshot": str(snap.relative_to(ROOT)),
@@ -546,8 +553,12 @@ def run_once() -> dict[str, Any]:
         })
         _write_best(best)
         rec["decision"] = "ACCEPTED"
-        print(f"[ACCEPTED] score {rec['score']:+.4f} (was {prev_best_score:+.4f}) "
-              f"-> {snap.name}")
+        if version_reset:
+            print(f"[ACCEPTED] score {rec['score']:+.4f} (new {rec_score_version} baseline) "
+                  f"-> {snap.name}")
+        else:
+            print(f"[ACCEPTED] score {rec['score']:+.4f} (was {prev_best_score:+.4f}) "
+                  f"-> {snap.name}")
 
         # 归档到 factor_library/（不影响 accept 决策；失败仅记日志）
         try:
