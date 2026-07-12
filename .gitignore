@@ -2,6 +2,8 @@ __pycache__/
 *.py[cod]
 .DS_Store
 .venv/
+.env
+.env.*
 
 # Large/local generated assets
 stock_data/
