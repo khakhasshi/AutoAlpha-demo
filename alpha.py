@@ -10,12 +10,12 @@ LABEL_KIND: str = 'rank'
 FACTOR_NAME: str = 'demo_v1_h20_rank_composite_icir_decay'
 
 ITER_NOTE: dict = {
-    'op_type': 'delete_factor',
-    'hypothesis': 'The factor with the highest average pairwise Spearman correlation contributes least incremental information and inflates the redundancy penalty. Removing it will reduce max_factor_corr, directly increasing the score via lower redundancy penalty, and may reduce noise and turnover.',
-    'change': 'Computed average absolute Spearman correlation of each factor with the other 15 factors over the train period. Identified and deleted the factor with the highest average correlation from FACTORS. Recalculated ICIR decay weights on the remaining 15 factors. All other components unchanged.',
-    'expected': 'Score improvement primarily from lowered redundancy penalty; may also slightly reduce turnover. Potential minor IC decline but net positive due to penalty reduction.',
-    'parent_iter': 219,
-    'reasoning': 'Current best has high redundancy_penalty (max_factor_corr > 0.84). Deleting the most correlated factor directly attacks this bottleneck and should raise score by reducing the penalty.',
+    'op_type': 'combine_method',
+    'hypothesis': 'A 5-day rolling median further reduces day-to-day signal noise, leading to lower turnover and more consistent year-over-year performance without significantly harming IC.',
+    'change': 'In the final signal processing, change the rolling median window from 3 to 5 days. Keep all other steps (cs_rank_zscore per factor, ICIR decay weighting, final cs_rank_zscore) unchanged.',
+    'expected': 'Score +0.02-0.06 from reduced turnover penalty and improved year_stability; potential slight lag in signal responsiveness.',
+    'parent_iter': 220,
+    'reasoning': 'Current best bottleneck is year_stability_low; smoothing should reduce noise and improve stability without large IC loss.',
 }
 
 
@@ -376,9 +376,9 @@ def run(train_panel: pd.DataFrame, val_panel: pd.DataFrame) -> tuple[pd.DataFram
     weights = _icir_weights(fps_train, train_panel)
     sig_train_raw = combine_icir_weight(fps_train, weights)
     sig_val_raw = combine_icir_weight(fps_val, weights)
-    # Apply 3-day rolling median smoothing per stock over time to reduce outlier noise
-    sig_train_smooth = sig_train_raw.rolling(window=3, min_periods=1, center=False).median()
-    sig_val_smooth = sig_val_raw.rolling(window=3, min_periods=1, center=False).median()
+    # Apply 5-day rolling median smoothing per stock over time to reduce outlier noise
+    sig_train_smooth = sig_train_raw.rolling(window=5, min_periods=1, center=False).median()
+    sig_val_smooth = sig_val_raw.rolling(window=5, min_periods=1, center=False).median()
     return _finalize(sig_train_smooth), _finalize(sig_val_smooth)
 
 
