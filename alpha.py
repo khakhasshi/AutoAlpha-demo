@@ -11,11 +11,11 @@ FACTOR_NAME: str = 'demo_v1_h20_rank_composite_icir_decay'
 
 ITER_NOTE: dict = {
     'op_type': 'other',
-    'hypothesis': '在不改变因子逻辑的前提下，将当前best作为trade_v3新评价体系的承接基准。',
+    'hypothesis': '在不改变因子逻辑的前提下，将当前最高分best作为trade_v4新奖励机制的承接基准。',
     'change': '补充cs_winsorize_zscore兼容入口；保持HORIZON、LABEL_KIND、因子列表和组合逻辑不变。',
-    'expected': '建立trade_v3 baseline，后续迭代继续从当前best进度出发。',
-    'parent_iter': 147,
-    'reasoning': '当前研究已在trade_v2下收敛。先用当前best在trade_v3下重估，保留历史记录，同时为下一阶段低相关因子和低换手研究建立可比基线。'
+    'expected': '建立trade_v4 baseline，后续迭代继续从当前最高分进度出发。',
+    'parent_iter': 156,
+    'reasoning': '当前研究在trade_v3下继续收敛，最高分来自#0156。先用该best在trade_v4下重估，保留历史记录，同时为复杂度、同质化和年度稳定性奖励建立新基线。'
 }
 
 

@@ -482,6 +482,10 @@ def journal_runs(limit: int = 80) -> list[dict[str, Any]]:
             is_new_best = False
             best_score = None if best == float("-inf") else best
             delta_to_best = None
+        score_raw = {}
+        score_breakdown = rec.get("score_breakdown")
+        if isinstance(score_breakdown, dict) and isinstance(score_breakdown.get("raw"), dict):
+            score_raw = score_breakdown["raw"]
         slim = {
             "iter_id": rec.get("iter_id"),
             "ts": rec.get("ts"),
@@ -504,6 +508,13 @@ def journal_runs(limit: int = 80) -> list[dict[str, Any]]:
             "annual_turnover": rec.get("annual_turnover"),
             "monotonicity": rec.get("monotonicity"),
             "excess_sharpe": rec.get("excess_sharpe"),
+            "factor_count": rec.get("factor_count"),
+            "alpha_lines": rec.get("alpha_lines"),
+            "year_stability": score_raw.get("year_stability"),
+            "positive_year_ratio": score_raw.get("positive_year_ratio"),
+            "turnover_penalty": score_raw.get("turnover_penalty"),
+            "complexity_penalty": score_raw.get("complexity_penalty"),
+            "redundancy_penalty": score_raw.get("redundancy_penalty"),
             "error": rec.get("error"),
             "score_anomaly": rec.get("score_anomaly"),
             "note_path": rec.get("note_path"),
@@ -1164,6 +1175,11 @@ INDEX_HTML = r"""<!doctype html>
           `turnover ${fmt(Number(run.annual_turnover), 1)}`,
           `mdd ${pct(run.max_drawdown)}`,
           `ret ${pct(run.annual_return)}`,
+          Number.isFinite(Number(run.year_stability)) ? `year ${fmt(Number(run.year_stability), 2)}` : null,
+          Number.isFinite(Number(run.positive_year_ratio)) ? `posY ${pct(run.positive_year_ratio)}` : null,
+          Number.isFinite(Number(run.factor_count)) ? `factors ${run.factor_count}` : null,
+          Number.isFinite(Number(run.complexity_penalty)) && Number(run.complexity_penalty) > 0 ? `complex ${fmt(Number(run.complexity_penalty), 2)}` : null,
+          Number.isFinite(Number(run.redundancy_penalty)) && Number(run.redundancy_penalty) > 0 ? `redundant ${fmt(Number(run.redundancy_penalty), 2)}` : null,
           run.score_anomaly ? 'score anomaly' : null,
         ].filter(Boolean).forEach(c => appendText(chips, 'span', 'chip', c));
         card.appendChild(chips);

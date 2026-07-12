@@ -372,6 +372,18 @@ def evaluate_once(iter_id: int) -> tuple[dict[str, Any], dict[str, Any]]:
         sig_train, sig_val = alpha.run(train, val)
         prepare.validate_signal(sig_train, "alpha.sig_train")
         prepare.validate_signal(sig_val, "alpha.sig_val")
+        factor_count = len(getattr(alpha, "FACTORS", []) or [])
+        try:
+            alpha_lines = len(ALPHA_PATH.read_text(encoding="utf-8").splitlines())
+        except Exception:
+            alpha_lines = 0
+        score_meta = {
+            "factor_count": factor_count,
+            "alpha_lines": alpha_lines,
+        }
+        if corr_summary:
+            score_meta["max_factor_corr"] = corr_summary.get("max_offdiag_abs")
+        sig_val.attrs.update(score_meta)
         rpt = prepare.primary_score(
             sig_val, val, horizon=horizon, label_kind=label_kind,
         )
@@ -404,6 +416,8 @@ def evaluate_once(iter_id: int) -> tuple[dict[str, Any], dict[str, Any]]:
             "max_drawdown": rpt.max_drawdown,
             "annual_turnover": rpt.annual_turnover,
             "n_days": rpt.n_days,
+            "factor_count": factor_count,
+            "alpha_lines": alpha_lines,
             # 超额（vs 中证 1000；当前 score_version 会进入 score）
             "excess_annual_return": getattr(rpt, "excess_annual_return", float("nan")),
             "excess_sharpe":         getattr(rpt, "excess_sharpe", float("nan")),
