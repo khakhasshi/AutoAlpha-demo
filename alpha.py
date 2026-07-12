@@ -9,12 +9,12 @@ LABEL_KIND: str = 'rank'
 FACTOR_NAME: str = 'demo_v1_h1_idiovol10_13factors_no_momentum10_rev1_icir_roll126'
 
 ITER_NOTE: dict = {
-    'op_type': 'modify_factor',
-    'hypothesis': 'Shortening idiosyncratic volatility window from 20 to 10 days to better align with HORIZON=1, expecting improved signal responsiveness.',
-    'change': 'Replaced f_idio_vol_20 with f_idio_vol_10 (rolling window 10 days, min_periods 5). All other factors and IC_IR weighting unchanged.',
-    'expected': 'score improvement of 0.02–0.05.',
-    'parent_iter': 91,
-    'reasoning': 'With HORIZON=1, more recent residual volatility may contain stronger reversal information than a 20-day window.',
+    'op_type': 'combine_method',
+    'hypothesis': 'Shrinking IC_IR estimates towards the cross-factor mean reduces weight noise and should improve rank_ic_ir stability.',
+    'change': 'In _icir_weights, apply 0.2 shrinkage to each valid factor\'s raw IC_IR before computing normalized weights.',
+    'expected': 'score increase of 0.02–0.04 via a slightly higher rank_ic_ir.',
+    'parent_iter': 92,
+    'reasoning': 'With 13 factors and HORIZON=1, IC_IR estimates are noisy; shrinkage acts as a light regulariser that should make combined forecasts more consistent.',
 }
 
 
@@ -195,19 +195,31 @@ def _icir_weights(factor_panels: list[pd.DataFrame], train_panel: pd.DataFrame) 
     import prepare
     labels = prepare.make_labels(train_panel, HORIZON, kind=LABEL_KIND)
     raw = []
+    valid_mask = []
     window = 126
     for f in factor_panels:
         ic = _daily_rank_ic(f, labels)
         if len(ic) < 20:
             raw.append(0.0)
+            valid_mask.append(False)
             continue
         wm = ic.rolling(window=window, min_periods=20).mean().iloc[-1]
         ws = ic.rolling(window=window, min_periods=20).std().iloc[-1]
         if np.isnan(wm) or np.isnan(ws) or ws == 0:
             raw.append(0.0)
+            valid_mask.append(False)
         else:
             raw.append(wm / ws)
+            valid_mask.append(True)
     w = np.asarray(raw, dtype=float)
+    valid_mask = np.array(valid_mask)
+    # shrinkage: pull valid IC_IR estimates towards their cross‑sectional mean
+    if valid_mask.any():
+        mean_ir = np.mean(w[valid_mask])
+        shrink = 0.2
+        for i in range(len(w)):
+            if valid_mask[i]:
+                w[i] = (1.0 - shrink) * w[i] + shrink * mean_ir
     denom = np.nansum(np.abs(w))
     if denom <= 0.0:
         return np.ones(len(factor_panels), dtype=float) / len(factor_panels)
