@@ -34,6 +34,7 @@
 | `orthogonal_residual` | 同质化、低相关 | `residualize(raw_factor, existing_signal)` | 先构造 raw idea，再保留对现有因子正交的新信息 |
 | `factor_pruning` | 复杂度、同质化 | `delete_or_downweight_high_corr_factor` | 删减或降低边际贡献差的因子 |
 | `signal_stability` | 年度稳定性、换手 | `ewm_signal_smoothing`, `weight_stabilization`, `top_bucket_persistence` | 组合层稳定化，不新增 raw 因子 |
+| `robustness_audit` | 验证集过拟合风险、阶段复核 | `ablate_smoother`, `stress_smoothing_span`, `remove_low_value_layer` | 只允许用在 alpha.py 内的简化/消融式改动；不读取 test，不改 runner |
 
 ---
 
@@ -96,19 +97,42 @@
 
 ## 5. 当前阶段偏好
 
-当前 `trade_v4` best 的主要瓶颈通常来自：
-- 年度稳定性偏弱；
-- 收益/回撤效率仍可提升；
-- 换手和复杂度暂时不应恶化。
+当前 `trade_v4` best 已进入 **Phase 3：稳健性与反过拟合阶段**。
+近期真正突破来自：
+- #0219 新增 `slow_vol_regime_60`，带来最大结构性提升；
+- #0220 删除高相关冗余因子，直接消除同质化惩罚；
+- #0250/#0262/#0263 通过自适应平滑和最终 rolling median 提升交易质量。
+
+这意味着继续只调 `span/window/rolling median/ewm` 已经进入尾部收益区。后续 proposal
+必须默认把“平滑参数继续加码”视为过拟合风险，而不是主要研究方向。
+
+当前主要瓶颈/风险来自：
+- 年度稳定性仍偏弱，但不能只靠继续加平滑解决；
+- Top basket Jaccard 已很高、换手已很低，继续降换手的边际价值下降；
+- val score 连续由平滑层抬升，存在验证段适配风险；
+- 新增因子必须证明低相关、低复杂度，并能保持 #0263 的交易质量。
 
 优先生成：
-- `path_quality`
-- `low_turnover_state`
-- `price_volume_divergence`
-- `signal_stability`
-- 简单的 `orthogonal_residual`
+- `factor_pruning`：删掉边际贡献低、与组合高度同质、或只增加复杂度的部件；
+- `orthogonal_residual`：只有当 raw idea 与现有组合确有新信息时才进入；
+- `low_turnover_state`：慢变量新结构，但不要再只是换一个更长窗口；
+- `price_volume_divergence` / `liquidity_shock`：必须控制换手，不破坏 Sharpe；
+- `robustness_audit`：在 alpha.py 内做简化/消融式改动，例如移除重复平滑层、检验是否仍保持大部分 score。
 
 暂缓生成：
-- 只改半衰期、窗口、标签口味的微调；
+- 只改半衰期、窗口、标签口味、平滑 span、rolling median window 的微调；
+- 继续叠加新的 `ewm`、`rolling median`、`volatility_quantile smoothing`；
 - 与 `momentum_20`、`price_range_position_10`、影线类高度相似的新因子；
+- 只为了降低换手而牺牲 IC/Sharpe 可解释性的 proposal；
 - 需要复杂循环 OLS 或大模型黑盒组合器的 proposal。
+
+## 6. Phase 3 proposal 约束
+
+每组三个候选 proposal 必须满足：
+
+1. 至少两个候选不是 `signal_stability` / `preprocess` 平滑类。
+2. 最多一个候选允许涉及平滑，而且必须说明为什么不是简单窗口微调。
+3. 至少一个候选必须是 `factor_pruning`、`orthogonal_residual` 或 `robustness_audit`。
+4. 如果 proposal 新增因子，必须写明它相对 `slow_vol_regime_60`、`momentum_20`、`price_range_position_10`
+   的差异，且预期不提高换手。
+5. 如果 proposal 删除或简化组件，必须说明可能损失哪些指标，以及为什么这有助于降低 val 适配风险。

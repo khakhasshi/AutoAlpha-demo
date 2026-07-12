@@ -61,6 +61,7 @@ ALLOWED_PROPOSAL_FAMILIES = {
     "orthogonal_residual",
     "factor_pruning",
     "signal_stability",
+    "robustness_audit",
 }
 
 STATE_LOCK = threading.RLock()
@@ -107,6 +108,7 @@ def default_memory() -> dict[str, Any]:
         "recent": [],
         "anomaly_reviews": [],
         "anomaly_guidance": "",
+        "stage_guidance": "Phase 3: avoid more smoothing parameter mining; prefer pruning, ablation, orthogonal residuals, and low-correlation structural ideas.",
     }
 
 
@@ -344,6 +346,7 @@ def memory_prompt_text(memory: dict[str, Any]) -> str:
         "promising": memory.get("promising", [])[-12:],
         "anomaly_guidance": memory.get("anomaly_guidance", ""),
         "anomaly_reviews": memory.get("anomaly_reviews", [])[-5:],
+        "stage_guidance": memory.get("stage_guidance", ""),
         "recent": recent,
     }, ensure_ascii=False, indent=2)
 
@@ -385,6 +388,7 @@ def detect_bottlenecks() -> dict[str, Any]:
     rec = current_best_record() or {}
     raw = ((rec.get("score_breakdown") or {}).get("raw") or {})
     weighted = ((rec.get("score_breakdown") or {}).get("weighted") or {})
+    diag = rec.get("diag") or {}
     bottlenecks: list[dict[str, Any]] = []
 
     def add(key: str, label: str, severity: float, evidence: dict[str, Any], advice: str) -> None:
@@ -465,6 +469,32 @@ def detect_bottlenecks() -> dict[str, Any]:
         "优先删减、合并或简化，而不是增加黑盒模型。",
     )
 
+    # Phase 3 guardrail: recent bests came mainly from increasingly strong
+    # smoothing. When turnover is already low and top-basket persistence is high,
+    # further span/window tuning is more likely validation adaptation than true
+    # alpha discovery.
+    top_basket_jaccard = diag.get("top_basket_jaccard")
+    score = rec.get("score")
+    sev = 0.0
+    if isinstance(score, int | float):
+        sev += max(0.0, (float(score) - 7.0) / 2.0)
+    if isinstance(annual_turnover, int | float):
+        sev += max(0.0, (22.0 - float(annual_turnover)) / 22.0)
+    if isinstance(top_basket_jaccard, int | float):
+        sev += max(0.0, (float(top_basket_jaccard) - 0.90) * 4.0)
+    add(
+        "validation_overfit_risk",
+        "平滑参数/验证集适配风险",
+        sev,
+        {
+            "score": score,
+            "annual_turnover": annual_turnover,
+            "top_basket_jaccard": top_basket_jaccard,
+            "recent_best_iter": rec.get("iter_id"),
+        },
+        "当前 best 已由多层平滑推高；优先做消融、删减、低相关新结构，避免继续只调 span/window/rolling median。",
+    )
+
     bottlenecks.sort(key=lambda x: x["severity"], reverse=True)
     return {
         "score_version": rec.get("score_version") or current_score_version(),
@@ -510,6 +540,10 @@ def score_proposal_for_gate(proposal: dict[str, Any], bottleneck: dict[str, Any]
     )).lower()
     targets = " ".join(str(t).lower() for t in proposal.get("targets", []))
     combined = f"{text} {targets}"
+    smoothing_terms = ("smooth", "smoothing", "ewm", "span", "rolling median", "window", "volatility_quantile", "平滑", "窗口")
+    simplification_terms = ("ablation", "ablate", "stress", "simplify", "delete", "remove", "prune", "消融", "简化", "删除", "移除")
+    is_smoothing_tweak = any(w in combined for w in smoothing_terms)
+    is_smoothing_simplification = is_smoothing_tweak and any(w in combined for w in simplification_terms)
     score = 0.0
     reasons: list[str] = []
     for b in bottleneck.get("top", []):
@@ -530,6 +564,13 @@ def score_proposal_for_gate(proposal: dict[str, Any], bottleneck: dict[str, Any]
         if key == "complexity_high" and any(w in combined for w in ("delete", "remove", "simplify", "删", "简化")):
             score += 2.5 + severity
             reasons.append("targets complexity")
+        if key == "validation_overfit_risk":
+            if any(w in combined for w in ("ablation", "ablate", "stress", "robust", "simplify", "delete", "remove", "prune", "orthogonal", "residual", "消融", "稳健", "简化", "删除", "正交", "残差")):
+                score += 4.0 + severity
+                reasons.append("targets validation overfit risk")
+            if is_smoothing_tweak and not is_smoothing_simplification:
+                score -= 3.0 + severity
+                reasons.append("penalized smoothing-tweak under overfit risk")
 
     op_type = proposal.get("op_type")
     family = str(proposal.get("family") or "unknown")
@@ -539,20 +580,31 @@ def score_proposal_for_gate(proposal: dict[str, Any], bottleneck: dict[str, Any]
     else:
         score -= 0.7
         reasons.append("unknown factor family")
-    if family in {"path_quality", "low_turnover_state", "signal_stability"}:
+    if family in {"path_quality", "low_turnover_state"}:
         score += 0.8
         reasons.append("preferred stability family")
-    if family in {"price_volume_divergence", "liquidity_shock", "orthogonal_residual"}:
-        score += 0.4
+    if family in {"price_volume_divergence", "liquidity_shock", "orthogonal_residual", "factor_pruning", "robustness_audit"}:
+        score += 0.7
         reasons.append("diversifying family")
+    if family == "signal_stability":
+        score -= 0.8
+        reasons.append("signal stability saturated in phase 3")
     if op_type == "add_factor":
         score -= 0.8
         reasons.append("add_factor risk")
-    if op_type in {"preprocess", "combine_method", "delete_factor"}:
+    if op_type in {"delete_factor", "robustness_audit"}:
+        score += 0.8
+    elif op_type in {"preprocess", "combine_method"}:
         score += 0.4
+        if is_smoothing_tweak and not is_smoothing_simplification:
+            score -= 2.0
+            reasons.append("preprocess smoothing tweak is now low value")
     if any(w in combined for w in ("halflife", "half-life", "半衰期", "horizon", "label_kind", "窗口微调")):
         score -= 2.5
         reasons.append("likely local tweak")
+    if is_smoothing_tweak and not is_smoothing_simplification:
+        score -= 2.5
+        reasons.append("repeated smoothing parameter tweak")
     recent_avoid = " ".join(str(x).lower() for x in memory.get("avoid", [])[-6:])
     if proposal.get("summary", "").lower()[:60] and proposal.get("summary", "").lower()[:60] in recent_avoid:
         score -= 3.0
@@ -922,6 +974,9 @@ Rules:
 - Prefer candidates that address the bottleneck detector below.
 - Avoid repeating recent rejected ideas in memory.
 - Avoid tiny half-life/window/label tweaks unless the bottleneck clearly demands them.
+- Phase 3 constraint: at most one proposal may be signal smoothing / preprocess span-window tuning.
+- Phase 3 constraint: at least one proposal must be factor_pruning, orthogonal_residual, or robustness_audit.
+- Phase 3 constraint: do not propose another plain EWM/rolling-median/span tweak unless it removes or simplifies an existing smoothing layer.
 {ctx["memory_block"]}
 
 Current runner status:
@@ -966,7 +1021,8 @@ Rules:
 - Keep the public contract: HORIZON, LABEL_KIND, ITER_NOTE, FACTORS, run(train_panel, val_panel).
 - Use only train data to estimate any fitted parameters. Validation is for runner evaluation only.
 - The implementation must match the selected proposal; do not switch to a different idea.
-- The current phase is post-convergence: prefer low-correlation, low-turnover, stable, simple changes over small IC decay/window tweaks.
+- The current phase is Phase 3 robustness: prefer low-correlation structure, pruning, orthogonal residuals, and simplification over more smoothing parameter tweaks.
+- If the selected proposal is a robustness_audit or pruning idea, it is acceptable for ITER_NOTE expected score to be flat/slightly down if the change reduces validation overfit risk.
 {ctx["memory_block"]}
 
 Current runner status:
