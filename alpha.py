@@ -6,15 +6,15 @@ import pandas as pd
 
 HORIZON: int = 1
 LABEL_KIND: str = 'rank'
-FACTOR_NAME: str = 'demo_v1_h1_idiovol10_13factors_no_momentum10_rev1_icir_roll126'
+FACTOR_NAME: str = 'demo_v1_h1_idiovol10_13factors_no_momentum10_rev1_icir_roll126_maxret10'
 
 ITER_NOTE: dict = {
-    'op_type': 'combine_method',
-    'hypothesis': 'Optimize factor weights using IC covariance matrix to maximize combined IC_IR, rather than individual IC_IR. This should produce more stable and diversified weights.',
-    'change': 'Replace rolling IC_IR estimation in _icir_weights with global covariance-based optimization on train IC series. Regularize covariance to avoid singularity.',
-    'expected': 'score improvement of 0.02-0.05 due to higher rank_ic_ir.',
-    'parent_iter': 93,
-    'reasoning': 'Individual IC_IR does not account for factor correlations; mean-variance optimization on IC space can improve the risk-adjusted performance of the combined signal in-sample, hopefully generalizing to validation.',
+    'op_type': 'modify_factor',
+    'hypothesis': 'Shorten f_max_ret window from 20 to 10 days to better capture recent extreme return reversal, aligned with HORIZON=1.',
+    'change': 'Modified f_max_ret_20 to f_max_ret_10 (window 10, min_periods 5). All other factors and combination method unchanged.',
+    'expected': 'score improvement of 0.01-0.03 due to higher rank_ic_ir.',
+    'parent_iter': 94,
+    'reasoning': 'The 20-day max return may include noise outdated for next-day prediction; 10 days may sharpen the reversal signal.',
 }
 
 
@@ -127,10 +127,10 @@ def f_lower_shadow_ratio_5(panel: pd.DataFrame) -> pd.DataFrame:
     return avg_ratio
 
 
-def f_max_ret_20(panel: pd.DataFrame) -> pd.DataFrame:
+def f_max_ret_10(panel: pd.DataFrame) -> pd.DataFrame:
     close = _pivot(panel, 'close')
     ret = close.pct_change(fill_method=None)
-    max_ret = ret.rolling(20, min_periods=5).max()
+    max_ret = ret.rolling(10, min_periods=5).max()
     return -max_ret
 
 
@@ -157,7 +157,7 @@ FACTORS = [
     f_volume_volatility_10,
     f_upper_shadow_ratio_5,
     f_lower_shadow_ratio_5,
-    f_max_ret_20,
+    f_max_ret_10,
     f_idio_vol_10,
 ]
 
