@@ -9,12 +9,13 @@ LABEL_KIND: str = 'rank'
 FACTOR_NAME: str = 'demo_v1_h1_idiovol10_13factors_no_momentum10_rev1_icir_roll126_maxret10'
 
 ITER_NOTE: dict = {
-    'op_type': 'modify_factor',
-    'hypothesis': 'Shorten f_max_ret window from 20 to 10 days to better capture recent extreme return reversal, aligned with HORIZON=1.',
-    'change': 'Modified f_max_ret_20 to f_max_ret_10 (window 10, min_periods 5). All other factors and combination method unchanged.',
-    'expected': 'score improvement of 0.01-0.03 due to higher rank_ic_ir.',
-    'parent_iter': 94,
-    'reasoning': 'The 20-day max return may include noise outdated for next-day prediction; 10 days may sharpen the reversal signal.',
+    'op_type': 'add_factor',
+    'hypothesis': 'Add f_price_range_position_10 factor to capture short-term mean-reversion from price position within 10-day high-low range. Expected to have low correlation with existing factors and improve rank_ic_ir.',
+    'change': 'Added f_price_range_position_10 factor function and appended to FACTORS list. No other changes.',
+    'expected': 'score improvement of +0.01-0.03 due to additional independent reversal signal.',
+    'parent_iter': 100,
+    'reasoning': 'Existing factors cover various reversal patterns, but a bounded range position measure (relative to recent high-low) has not been included. It captures a distinct aspect of mean-reversion with a natural 0-1 scale, likely low correlation with other oscillators.',
+    'new_factor': 'f_price_range_position_10',
 }
 
 
@@ -145,6 +146,18 @@ def f_idio_vol_10(panel: pd.DataFrame) -> pd.DataFrame:
     return -idio_vol
 
 
+def f_price_range_position_10(panel: pd.DataFrame) -> pd.DataFrame:
+    close = _pivot(panel, 'close')
+    high = _pivot(panel, 'high')
+    low = _pivot(panel, 'low')
+    roll_high = high.rolling(10, min_periods=5).max()
+    roll_low = low.rolling(10, min_periods=5).min()
+    range_hl = roll_high - roll_low
+    with np.errstate(invalid='ignore'):
+        position = (close - roll_low) / range_hl - 0.5
+    return -position
+
+
 FACTORS = [
     f_reversal_1,
     f_volatility_10,
@@ -159,6 +172,7 @@ FACTORS = [
     f_lower_shadow_ratio_5,
     f_max_ret_10,
     f_idio_vol_10,
+    f_price_range_position_10,
 ]
 
 
