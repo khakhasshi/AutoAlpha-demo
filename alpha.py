@@ -10,13 +10,12 @@ LABEL_KIND: str = 'rank'
 FACTOR_NAME: str = 'demo_v1_h20_rank_composite_icir_decay'
 
 ITER_NOTE: dict = {
-    'op_type': 'add_factor',
-    'hypothesis': 'Stocks with lower recent volatility relative to longer-term average are in a stable regime, leading to fewer extreme drawdowns and more consistent yearly returns.',
-    'change': 'Add f_slow_vol_regime_60: ratio of 60-day to 252-day volatility, negated. Append to FACTORS (now 16 factors). Keep rolling median smoothing and ICIR decay weighting unchanged.',
-    'expected': 'Score +0.05–0.12 from improved year_stability and efficiency; low turnover impact.',
-    'parent_iter': 201,
-    'reasoning': 'Current best has low year_stability; adding a slow volatility regime factor avoids stacking highly correlated factors and targets stability bottleneck.',
-    'new_factor': 'f_slow_vol_regime_60'
+    'op_type': 'delete_factor',
+    'hypothesis': 'The factor with the highest average pairwise Spearman correlation contributes least incremental information and inflates the redundancy penalty. Removing it will reduce max_factor_corr, directly increasing the score via lower redundancy penalty, and may reduce noise and turnover.',
+    'change': 'Computed average absolute Spearman correlation of each factor with the other 15 factors over the train period. Identified and deleted the factor with the highest average correlation from FACTORS. Recalculated ICIR decay weights on the remaining 15 factors. All other components unchanged.',
+    'expected': 'Score improvement primarily from lowered redundancy penalty; may also slightly reduce turnover. Potential minor IC decline but net positive due to penalty reduction.',
+    'parent_iter': 219,
+    'reasoning': 'Current best has high redundancy_penalty (max_factor_corr > 0.84). Deleting the most correlated factor directly attacks this bottleneck and should raise score by reducing the penalty.',
 }
 
 
@@ -339,9 +338,41 @@ def _finalize(signal: pd.DataFrame) -> pd.DataFrame:
     return cs_rank_zscore(signal)
 
 
+def _highest_corr_factor_index(factor_panels: list[pd.DataFrame]) -> int:
+    """Identify factor with highest mean absolute Spearman correlation to others."""
+    n = len(factor_panels)
+    corr_matrix = np.zeros((n, n))
+    for i in range(n):
+        for j in range(i+1, n):
+            fi = factor_panels[i]
+            fj = factor_panels[j]
+            pair_corrs = []
+            for date in fi.index:
+                si = fi.loc[date]
+                sj = fj.loc[date]
+                common = si.dropna().index.intersection(sj.dropna().index)
+                if len(common) >= 30:
+                    ci = si.loc[common]
+                    cj = sj.loc[common]
+                    cc = ci.corr(cj, method='spearman')
+                    if not np.isnan(cc):
+                        pair_corrs.append(cc)
+            avg_corr = np.mean(pair_corrs) if pair_corrs else np.nan
+            corr_matrix[i, j] = avg_corr
+            corr_matrix[j, i] = avg_corr
+    mean_abs_corr = np.nanmean(np.abs(corr_matrix), axis=1)
+    return int(np.argmax(mean_abs_corr))
+
+
 def run(train_panel: pd.DataFrame, val_panel: pd.DataFrame) -> tuple[pd.DataFrame, pd.DataFrame]:
-    fps_train = _factor_panels(train_panel)
-    fps_val = _factor_panels(val_panel)
+    fps_train_all = _factor_panels(train_panel)
+    fps_val_all = _factor_panels(val_panel)
+
+    drop_idx = _highest_corr_factor_index(fps_train_all)
+
+    fps_train = [f for i, f in enumerate(fps_train_all) if i != drop_idx]
+    fps_val = [f for i, f in enumerate(fps_val_all) if i != drop_idx]
+
     weights = _icir_weights(fps_train, train_panel)
     sig_train_raw = combine_icir_weight(fps_train, weights)
     sig_val_raw = combine_icir_weight(fps_val, weights)
