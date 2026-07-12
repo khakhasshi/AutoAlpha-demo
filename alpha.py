@@ -9,12 +9,13 @@ LABEL_KIND: str = 'rank'
 FACTOR_NAME: str = 'demo_v1_h5_idiovol10_13factors_no_momentum10_rev1_icir_roll126_maxret10'
 
 ITER_NOTE: dict = {
-    'op_type': 'horizon',
-    'hypothesis': '将持有期从 1 天延长到 5 天，预期能显著降低换手率、改善交易质量，从而提升综合 score，尽管 IC 可能下降。',
-    'change': '仅修改全局常量 HORIZON = 5，因子库、预处理、IC_IR 加权方法均保持不变。',
-    'expected': 'score 可能提升 +0.2~+0.5，因为换手惩罚大幅减少，且超额夏普可能改善；但 IC 可能有所降低。',
-    'parent_iter': 113,
-    'reasoning': '当前 HORIZON=1 导致年换手极高，严重拉低 trade_v2 score。延长持有期是降低换手率的直接手段，同时可能提高信号稳健性。'
+    'op_type': 'add_factor',
+    'hypothesis': '添加20日动量因子，当前因子库以反转类为主，缺少中长期动量因子；在H=5持有期下，20日动量可能捕获趋势延续效应，与现有反转因子互补，预期提高信号多元性。',
+    'change': '在FACTORS列表末尾添加f_momentum_20，实现为close.pct_change(20)；其他保持不变。',
+    'expected': 'score可能提升0.05~0.2，因为增加了新信息源；注意因子相关性检测。',
+    'parent_iter': 115,
+    'reasoning': 'best #115使用H=5且IC_IR加权，但因子库缺乏正向动量，添加20日动量可丰富信号维度。',
+    'new_factor': 'f_momentum_20'
 }
 
 
@@ -157,6 +158,11 @@ def f_price_range_position_10(panel: pd.DataFrame) -> pd.DataFrame:
     return -position
 
 
+def f_momentum_20(panel: pd.DataFrame) -> pd.DataFrame:
+    close = _pivot(panel, 'close')
+    return close.pct_change(20, fill_method=None)
+
+
 FACTORS = [
     f_reversal_1,
     f_volatility_10,
@@ -172,6 +178,7 @@ FACTORS = [
     f_max_ret_10,
     f_idio_vol_10,
     f_price_range_position_10,
+    f_momentum_20,
 ]
 
 
