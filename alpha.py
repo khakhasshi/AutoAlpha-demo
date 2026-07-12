@@ -11,11 +11,11 @@ FACTOR_NAME: str = 'demo_v1_h20_rank_composite_icir_decay'
 
 ITER_NOTE: dict = {
     'op_type': 'preprocess',
-    'hypothesis': 'A wider smoothing span range during high volatility reduces noise in the combined signal, leading to more consistent year-to-year performance.',
-    'change': 'Modify adaptive EMA span calculation: span = 3 + volatility_quantile * 9 (range [3,12]) instead of previous [2,6].',
-    'expected': 'Score +0.01-0.03 from improved year_stability; slight risk of lag but negligible.',
-    'parent_iter': 250,
-    'reasoning': 'Bottleneck is year_stability_low; wider span range gives stronger smoothing for high-vol stocks, reducing noise and improving stability.'
+    'hypothesis': 'The combined signal contains transient noise that can cause unnecessary turnover and degrade year stability. A short rolling median on the final signal preserves trend while removing outliers.',
+    'change': 'After z-scoring the final signal, apply a per-stock rolling median with window=3 (min_periods=1) and then re-zscore. All other steps (ICIR decay, factor preprocessing, adaptive EMA smoothing) remain unchanged.',
+    'expected': 'Score +0.01-0.03 from improved year_stability; slight risk of lag but window=3 is short.',
+    'parent_iter': 262,
+    'reasoning': 'Bottleneck is year_stability_low; a final 3-day rolling median on the z-scored signal removes residual outliers while preserving trend, with minimal lag.'
 }
 
 
@@ -260,7 +260,6 @@ def _icir_weights(factor_panels: list[pd.DataFrame], train_panel: pd.DataFrame, 
             ic_list_rank.append(ic_r)
             ic_list_pearson.append(ic_p)
 
-    # collect all non-empty dates and find latest reference date
     all_dates = pd.DatetimeIndex([])
     for s in ic_list_rank + ic_list_pearson:
         if not s.empty:
@@ -275,7 +274,6 @@ def _icir_weights(factor_panels: list[pd.DataFrame], train_panel: pd.DataFrame, 
     ir_rank = []
     ir_pearson = []
     for ic_r, ic_p in zip(ic_list_rank, ic_list_pearson):
-        # rank IC
         if ic_r.empty or len(ic_r) < 20:
             ir_rank.append(0.0)
         else:
@@ -290,7 +288,6 @@ def _icir_weights(factor_panels: list[pd.DataFrame], train_panel: pd.DataFrame, 
                 sigma = mad * 1.4826
                 ir = med / (sigma + 1e-8)
                 ir_rank.append(ir)
-        # pearson IC
         if ic_p.empty or len(ic_p) < 20:
             ir_pearson.append(0.0)
         else:
@@ -386,7 +383,7 @@ def run(train_panel: pd.DataFrame, val_panel: pd.DataFrame) -> tuple[pd.DataFram
     # rolling 20-day std as volatility proxy
     roll_vol = ret_train.rolling(20, min_periods=5).std()
     # average volatility over train period for each stock
-    avg_vol = roll_vol.mean()  # Series indexed by symbol
+    avg_vol = roll_vol.mean()
     # cross-sectional quantile (0-1)
     vol_quantile = avg_vol.rank(pct=True, method='average').clip(1e-6, 1 - 1e-6)
     # span = 3 + quantile * 9, range [3,12]
@@ -404,9 +401,17 @@ def run(train_panel: pd.DataFrame, val_panel: pd.DataFrame) -> tuple[pd.DataFram
         return smoothed
 
     sig_train_ema = _apply_adaptive_ema(sig_train_smooth, span_train)
-    sig_val_ema = _apply_adaptive_ema(sig_val_smooth, span_train)  # same mapping
+    sig_val_ema = _apply_adaptive_ema(sig_val_smooth, span_train)
 
-    return _finalize(sig_train_ema), _finalize(sig_val_ema)
+    # Final zscore
+    sig_train_z = _finalize(sig_train_ema)
+    sig_val_z = _finalize(sig_val_ema)
+
+    # Apply rolling median (window=3) and re-zscore
+    sig_train_med = sig_train_z.rolling(window=3, min_periods=1).median()
+    sig_val_med = sig_val_z.rolling(window=3, min_periods=1).median()
+
+    return _finalize(sig_train_med), _finalize(sig_val_med)
 
 
 if __name__ == '__main__':
