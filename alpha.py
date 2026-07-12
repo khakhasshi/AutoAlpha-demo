@@ -6,15 +6,15 @@ import pandas as pd
 
 HORIZON: int = 20
 LABEL_KIND: str = 'rank'
-FACTOR_NAME: str = 'demo_v1_h20_idiovol10_13factors_no_momentum10_rev1_icir_roll126_maxret10'
+FACTOR_NAME: str = 'demo_v1_h20_rank_composite_icir'
 
 ITER_NOTE: dict = {
-    'op_type': 'horizon',
-    'hypothesis': '将HORIZON从10改为20，进一步延长持有期，预期大幅降低换手率、改善回撤和夏普，提升trade_v2评分。',
-    'change': 'HORIZON从10改为20，更新FACTOR_NAME标识，其他保持不变。',
-    'expected': '换手率进一步下降，回撤质量提高，IC可能微降，总体score预计+0.1~+0.3。',
-    'parent_iter': 117,
-    'reasoning': '当前最佳#117 H=10，score 3.765，H=5时score 2.36，趋势表明更长持有期有利于交易质量。尝试H=20探索极限。'
+    'op_type': 'combine_method',
+    'hypothesis': '使用复合IC_IR（rank IC IR + 0.5 * pearson IC IR）作为因子权重，以同时优化rank IC和pearson IC，提升score中pearson IC项。',
+    'change': '修改_icir_weights：增加_daily_pearson_ic计算，权重正比于 max(0, ir_rank + 0.5 * ir_pearson)。保持其他不变。',
+    'expected': 'score小幅提升0.03~0.1，因pearson IC改善。',
+    'parent_iter': 123,
+    'reasoning': '当前best已利用rank IC的IR，加入pearson IC信息可提供额外信号，且不增加复杂度。'
 }
 
 
@@ -210,20 +210,32 @@ def _daily_rank_ic(signal: pd.DataFrame, labels: pd.DataFrame) -> pd.Series:
     return sig.corrwith(lab, axis=1).dropna()
 
 
+def _daily_pearson_ic(signal: pd.DataFrame, labels: pd.DataFrame) -> pd.Series:
+    common_idx = signal.index.intersection(labels.index)
+    common_cols = signal.columns.intersection(labels.columns)
+    sig = signal.reindex(index=common_idx, columns=common_cols)
+    lab = labels.reindex(index=common_idx, columns=common_cols)
+    return sig.corrwith(lab, axis=1).dropna()
+
+
 def _icir_weights(factor_panels: list[pd.DataFrame], train_panel: pd.DataFrame) -> np.ndarray:
     import prepare
     labels = prepare.make_labels(train_panel, HORIZON, kind=LABEL_KIND)
 
-    ic_list = []
+    ic_list_rank = []
+    ic_list_pearson = []
     for f in factor_panels:
-        ic = _daily_rank_ic(f, labels)
-        if len(ic) < 20:
-            ic_list.append(pd.Series(dtype=float))
+        ic_r = _daily_rank_ic(f, labels)
+        ic_p = _daily_pearson_ic(f, labels)
+        if len(ic_r) < 20:
+            ic_list_rank.append(pd.Series(dtype=float))
+            ic_list_pearson.append(pd.Series(dtype=float))
         else:
-            ic_list.append(ic)
+            ic_list_rank.append(ic_r)
+            ic_list_pearson.append(ic_p)
 
     common_dates = None
-    for ic in ic_list:
+    for ic in ic_list_rank:
         if not ic.empty:
             if common_dates is None:
                 common_dates = ic.index
@@ -233,26 +245,35 @@ def _icir_weights(factor_panels: list[pd.DataFrame], train_panel: pd.DataFrame) 
     if common_dates is None or len(common_dates) < 20:
         return np.ones(len(factor_panels)) / len(factor_panels)
 
-    ic_matrix = pd.DataFrame({i: ic.reindex(common_dates) for i, ic in enumerate(ic_list)})
-    ic_matrix = ic_matrix.dropna(axis=1, how='all')
-    if ic_matrix.shape[1] == 0:
+    rank_ic_mat = pd.DataFrame({i: ic.reindex(common_dates) for i, ic in enumerate(ic_list_rank)})
+    rank_ic_mat = rank_ic_mat.dropna(axis=1, how='all')
+    pearson_ic_mat = pd.DataFrame({i: ic.reindex(common_dates) for i, ic in enumerate(ic_list_pearson)})
+    pearson_ic_mat = pearson_ic_mat.dropna(axis=1, how='all')
+
+    common_cols = rank_ic_mat.columns.intersection(pearson_ic_mat.columns)
+    rank_ic_mat = rank_ic_mat[common_cols]
+    pearson_ic_mat = pearson_ic_mat[common_cols]
+
+    if len(common_cols) == 0:
         return np.ones(len(factor_panels)) / len(factor_panels)
 
-    # 计算每个因子的 IC_IR = mean(IC) / std(IC)，最少需要20个观测，否则设NaN
-    mu = ic_matrix.mean(axis=0, skipna=True)
-    std = ic_matrix.std(axis=0, skipna=True, ddof=1)
-    # 避免除零，将std过小的设为NaN
-    min_std = 1e-8
-    safe_std = std.where(std > min_std, np.nan)
-    ir = mu / safe_std
-    # 仅保留 IR > 0 的因子
-    positive_ir = ir.where(ir > 0, 0.0)
+    mu_rank = rank_ic_mat.mean()
+    std_rank = rank_ic_mat.std()
+    ir_rank = mu_rank / (std_rank.replace(0, np.nan)).clip(lower=1e-8)
+
+    mu_pearson = pearson_ic_mat.mean()
+    std_pearson = pearson_ic_mat.std()
+    ir_pearson = mu_pearson / (std_pearson.replace(0, np.nan)).clip(lower=1e-8)
+
+    composite_ir = ir_rank + 0.5 * ir_pearson
+    positive_ir = composite_ir.clip(lower=0)
     if positive_ir.sum() == 0:
         return np.ones(len(factor_panels)) / len(factor_panels)
+
     weights = positive_ir / positive_ir.sum()
-    # 确保输出长度与因子列表一致
     full_weights = np.zeros(len(factor_panels))
-    full_weights[:len(weights)] = weights.values
+    for col, w in weights.items():
+        full_weights[col] = w
     return full_weights
 
 
