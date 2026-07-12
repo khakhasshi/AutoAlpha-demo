@@ -6,15 +6,15 @@ import pandas as pd
 
 HORIZON: int = 1
 LABEL_KIND: str = 'rank'
-FACTOR_NAME: str = 'demo_v1_h1_idiovol20_12factors_no_momentum10_icir_roll126'
+FACTOR_NAME: str = 'demo_v1_h1_idiovol20_12factors_no_momentum10_rev1_icir_roll126'
 
 ITER_NOTE: dict = {
-    'op_type': 'delete_factor',
-    'hypothesis': 'Removing f_momentum_10 (positive 10-day momentum) because it may introduce noise in a short-term reversal regime (HORIZON=1). Single change. Parent iter 70.',
-    'change': 'Deleted f_momentum_10 function and its entry from FACTORS list.',
-    'expected': 'score +0.03–0.07, rank_ic_ir possibly slightly improved by reducing contradictory trending signal.',
-    'parent_iter': 70,
-    'reasoning': 'HORIZON=1 favors reversal over momentum. All other factors are capped or negated to act as reversal predictors, but f_momentum_10 was kept as a pure positive momentum factor. Removing it should reduce systematic noise.',
+    'op_type': 'modify_factor',
+    'hypothesis': 'Shortening reversal window from 3 to 1 day to better align with HORIZON=1, expecting improved signal responsiveness.',
+    'change': 'Replaced f_reversal_3 with f_reversal_1 (1-day return negated). All other factors and IC_IR weighting unchanged.',
+    'expected': 'score improvement of 0.02–0.05.',
+    'parent_iter': 83,
+    'reasoning': 'With HORIZON=1, ultra-short-term reversal may be more relevant than a 3-day window, which could average out recent signals.',
 }
 
 
@@ -34,9 +34,9 @@ def _pivot(panel: pd.DataFrame, col: str) -> pd.DataFrame:
     return panel.pivot(index='date', columns='symbol', values=col).sort_index()
 
 
-def f_reversal_3(panel: pd.DataFrame) -> pd.DataFrame:
+def f_reversal_1(panel: pd.DataFrame) -> pd.DataFrame:
     close = _pivot(panel, 'close')
-    return -close.pct_change(3, fill_method=None)
+    return -close.pct_change(1, fill_method=None)
 
 
 def f_volatility_10(panel: pd.DataFrame) -> pd.DataFrame:
@@ -148,7 +148,7 @@ def f_idio_vol_20(panel: pd.DataFrame) -> pd.DataFrame:
 
 
 FACTORS = [
-    f_reversal_3,
+    f_reversal_1,
     f_volatility_10,
     f_amihud_20,
     f_hl_range_10,
