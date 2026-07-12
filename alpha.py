@@ -10,12 +10,13 @@ LABEL_KIND: str = 'rank'
 FACTOR_NAME: str = 'demo_v1_h20_rank_composite_icir_decay'
 
 ITER_NOTE: dict = {
-    'op_type': 'preprocess',
-    'hypothesis': 'A rolling median filter (window=3) is more robust to outlier daily signals than EWM smoothing, reducing turnover and improving year-to-year stability while preserving sustained trends.',
-    'change': 'Replace the post-combination EWM smoothing (span=3) with a 3-day rolling median filter applied to the final raw signal per stock, then re-apply cs_rank_zscore.',
-    'expected': 'Score +0.05–0.15 from lower turnover penalty and improved year_stability; minimal IC impact.',
-    'parent_iter': 167,
-    'reasoning': 'Current best (iter 167) uses EWM smoothing; rolling median may further reduce turnover and improve stability, aligning with Phase 2 goals.'
+    'op_type': 'add_factor',
+    'hypothesis': 'Stocks with lower recent volatility relative to longer-term average are in a stable regime, leading to fewer extreme drawdowns and more consistent yearly returns.',
+    'change': 'Add f_slow_vol_regime_60: ratio of 60-day to 252-day volatility, negated. Append to FACTORS (now 16 factors). Keep rolling median smoothing and ICIR decay weighting unchanged.',
+    'expected': 'Score +0.05–0.12 from improved year_stability and efficiency; low turnover impact.',
+    'parent_iter': 201,
+    'reasoning': 'Current best has low year_stability; adding a slow volatility regime factor avoids stacking highly correlated factors and targets stability bottleneck.',
+    'new_factor': 'f_slow_vol_regime_60'
 }
 
 
@@ -163,6 +164,15 @@ def f_momentum_20(panel: pd.DataFrame) -> pd.DataFrame:
     return close.pct_change(20, fill_method=None)
 
 
+def f_slow_vol_regime_60(panel: pd.DataFrame) -> pd.DataFrame:
+    close = _pivot(panel, 'close')
+    ret = close.pct_change(fill_method=None)
+    vol_60 = ret.rolling(60, min_periods=20).std()
+    vol_252 = ret.rolling(252, min_periods=60).std()
+    ratio = vol_60 / vol_252.replace(0, np.nan)
+    return -ratio
+
+
 FACTORS = [
     f_reversal_1,
     f_volatility_10,
@@ -179,6 +189,7 @@ FACTORS = [
     f_idio_vol_10,
     f_price_range_position_10,
     f_momentum_20,
+    f_slow_vol_regime_60,
 ]
 
 
