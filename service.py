@@ -108,7 +108,7 @@ def default_memory() -> dict[str, Any]:
         "recent": [],
         "anomaly_reviews": [],
         "anomaly_guidance": "",
-        "stage_guidance": "Phase 3: avoid more smoothing parameter mining; prefer pruning, ablation, orthogonal residuals, and low-correlation structural ideas.",
+        "stage_guidance": "Phase 3: avoid more smoothing parameter mining; keep an explicit exploration budget for low-correlation structural factors, especially price-volume divergence, liquidity shock, bar structure, and orthogonal residuals.",
     }
 
 
@@ -544,6 +544,12 @@ def score_proposal_for_gate(proposal: dict[str, Any], bottleneck: dict[str, Any]
     simplification_terms = ("ablation", "ablate", "stress", "simplify", "delete", "remove", "prune", "消融", "简化", "删除", "移除")
     is_smoothing_tweak = any(w in combined for w in smoothing_terms)
     is_smoothing_simplification = is_smoothing_tweak and any(w in combined for w in simplification_terms)
+    exploration_families = {"price_volume_divergence", "liquidity_shock", "bar_structure", "orthogonal_residual"}
+    low_corr_terms = (
+        "low correlation", "low-corr", "orthogonal", "orthogonalize", "residual", "residualize",
+        "different from", "distinct from", "replace", "substitute", "低相关", "正交", "残差", "差异", "替换",
+    )
+    turnover_guard_terms = ("low turnover", "turnover neutral", "no turnover increase", "不提高换手", "低换手", "换手不增加")
     score = 0.0
     reasons: list[str] = []
     for b in bottleneck.get("top", []):
@@ -586,12 +592,33 @@ def score_proposal_for_gate(proposal: dict[str, Any], bottleneck: dict[str, Any]
     if family in {"price_volume_divergence", "liquidity_shock", "orthogonal_residual", "factor_pruning", "robustness_audit"}:
         score += 0.7
         reasons.append("diversifying family")
+    if family == "bar_structure":
+        score += 0.5
+        reasons.append("underused structural family")
+    if family in exploration_families:
+        score += 1.4
+        reasons.append("exploration bonus for low-correlation factor family")
+        if any(w in combined for w in low_corr_terms):
+            score += 1.0
+            reasons.append("states low-correlation or orthogonalization rationale")
+        if any(w in combined for w in turnover_guard_terms):
+            score += 0.6
+            reasons.append("states turnover guardrail")
+        if any(w in combined for w in ("slow_vol_regime", "momentum_20", "price_range_position_10", "range_position", "vol regime", "慢波动", "动量")):
+            score += 0.4
+            reasons.append("contrasts with current core factors")
     if family == "signal_stability":
         score -= 0.8
         reasons.append("signal stability saturated in phase 3")
     if op_type == "add_factor":
         score -= 0.8
         reasons.append("add_factor risk")
+        if family in exploration_families and any(w in combined for w in low_corr_terms):
+            score += 0.9
+            reasons.append("bounded add_factor exploration")
+        elif family not in exploration_families:
+            score -= 0.7
+            reasons.append("unbounded add_factor outside exploration budget")
     if op_type in {"delete_factor", "robustness_audit"}:
         score += 0.8
     elif op_type in {"preprocess", "combine_method"}:
@@ -640,6 +667,10 @@ def select_proposal(proposals: list[dict[str, Any]], bottleneck: dict[str, Any],
         elif family != "unknown":
             item["gate_score"] = round(float(item["gate_score"]) - 0.35, 4)
             item["gate_reasons"] = item.get("gate_reasons", []) + ["duplicate family in candidate set"]
+    if not any(str(item.get("family")) in {"price_volume_divergence", "liquidity_shock", "bar_structure", "orthogonal_residual"} for item in scored):
+        for item in scored:
+            item["gate_score"] = round(float(item["gate_score"]) - 1.0, 4)
+            item["gate_reasons"] = item.get("gate_reasons", []) + ["candidate set lacks low-correlation exploration"]
     scored.sort(key=lambda x: x["gate_score"], reverse=True)
     candidates = [dict(item) for item in scored]
     selected = dict(candidates[0])
@@ -976,7 +1007,9 @@ Rules:
 - Avoid tiny half-life/window/label tweaks unless the bottleneck clearly demands them.
 - Phase 3 constraint: at most one proposal may be signal smoothing / preprocess span-window tuning.
 - Phase 3 constraint: at least one proposal must be factor_pruning, orthogonal_residual, or robustness_audit.
+- Phase 3 exploration budget: at least one proposal must explore a low-correlation factor family: price_volume_divergence, liquidity_shock, bar_structure, or orthogonal_residual.
 - Phase 3 constraint: do not propose another plain EWM/rolling-median/span tweak unless it removes or simplifies an existing smoothing layer.
+- For any add_factor proposal, explicitly state why it differs from slow_vol_regime_60, momentum_20, and price_range_position_10, and why turnover should not increase.
 {ctx["memory_block"]}
 
 Current runner status:

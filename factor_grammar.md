@@ -111,6 +111,7 @@
 - Top basket Jaccard 已很高、换手已很低，继续降换手的边际价值下降；
 - val score 连续由平滑层抬升，存在验证段适配风险；
 - 新增因子必须证明低相关、低复杂度，并能保持 #0263 的交易质量。
+- 同时需要恢复因子探索积极度：不能因为平滑有效，就停止寻找新的结构性 alpha。
 
 优先生成：
 - `factor_pruning`：删掉边际贡献低、与组合高度同质、或只增加复杂度的部件；
@@ -131,8 +132,28 @@
 每组三个候选 proposal 必须满足：
 
 1. 至少两个候选不是 `signal_stability` / `preprocess` 平滑类。
-2. 最多一个候选允许涉及平滑，而且必须说明为什么不是简单窗口微调。
+2. 至少一个候选必须是低相关新因子探索，优先 `price_volume_divergence`、`liquidity_shock`、
+   `bar_structure` 或 `orthogonal_residual`。
 3. 至少一个候选必须是 `factor_pruning`、`orthogonal_residual` 或 `robustness_audit`。
-4. 如果 proposal 新增因子，必须写明它相对 `slow_vol_regime_60`、`momentum_20`、`price_range_position_10`
+4. 最多一个候选允许涉及平滑，而且必须说明为什么不是简单窗口微调。
+5. 如果 proposal 新增因子，必须写明它相对 `slow_vol_regime_60`、`momentum_20`、`price_range_position_10`
    的差异，且预期不提高换手。
-5. 如果 proposal 删除或简化组件，必须说明可能损失哪些指标，以及为什么这有助于降低 val 适配风险。
+6. 如果 proposal 删除或简化组件，必须说明可能损失哪些指标，以及为什么这有助于降低 val 适配风险。
+
+## 7. 因子探索积极度奖励
+
+proposal gate 应奖励“有边界的探索”，不是奖励因子数量。
+
+应加分：
+- 使用 `price_volume_divergence`、`liquidity_shock`、`bar_structure`、`orthogonal_residual`
+  等当前 best 尚未充分利用的 family；
+- 明确说明相对 `slow_vol_regime_60`、`momentum_20`、`price_range_position_10` 的差异；
+- 新因子承诺低换手、低复杂度，并且可以替换/删除一个旧部件，而不是无脑追加；
+- 使用 residualize/orthogonalize 保留新信息，或先做 raw factor 再做正交残差；
+- 针对收益/回撤效率、年度稳定性或超额 Sharpe，而不是只追 IC。
+
+应扣分：
+- add_factor 但没有低相关理由；
+- 只是同一 primitive 换窗口；
+- 与现有慢波动、动量、range position、影线因子高度相似；
+- 新因子会明显增加换手、复杂度或模型黑盒程度。
