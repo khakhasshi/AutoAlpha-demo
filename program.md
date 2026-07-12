@@ -61,6 +61,10 @@ score = IC 预测能力
 当前 best 已在 `HORIZON=20 / LABEL_KIND=rank / IC 衰减权重` 附近收敛。
 后续不要把主要预算花在半衰期、窗口和标签口味的细碎微调上。
 
+服务端 proposal gate 会读取 `factor_grammar.md`。当模型被要求给出 3 个候选 proposal 时，
+必须尽量使用 3 个不同 `family`，并声明 `primitive / transform / target_bottleneck`。
+这不是为了“多加因子”，而是为了让研究方向覆盖不同结构，避免换皮重复。
+
 1. **低相关新因子族**
    - 价量背离：价格创新高但量能未确认、放量下跌后的恢复、缩量回撤。
    - 趋势质量：20 日动量的路径平滑度、上涨日占比、回撤后的恢复斜率。

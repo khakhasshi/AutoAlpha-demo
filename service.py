@@ -51,6 +51,17 @@ DEFAULT_CONFIG: dict[str, Any] = {
     "enabled": False,
 }
 
+ALLOWED_PROPOSAL_FAMILIES = {
+    "path_quality",
+    "low_turnover_state",
+    "price_volume_divergence",
+    "liquidity_shock",
+    "bar_structure",
+    "orthogonal_residual",
+    "factor_pruning",
+    "signal_stability",
+}
+
 STATE_LOCK = threading.RLock()
 LOOP_THREAD: threading.Thread | None = None
 RUNTIME: dict[str, Any] = {
@@ -420,6 +431,10 @@ def normalize_proposals(payload: dict[str, Any]) -> list[dict[str, Any]]:
             "change": str(item.get("change") or ""),
             "expected": str(item.get("expected") or ""),
             "op_type": str(item.get("op_type") or "other"),
+            "family": str(item.get("family") or "unknown"),
+            "primitive": str(item.get("primitive") or ""),
+            "transform": str(item.get("transform") or ""),
+            "target_bottleneck": str(item.get("target_bottleneck") or ""),
             "targets": item.get("targets") if isinstance(item.get("targets"), list) else [],
             "risk": str(item.get("risk") or ""),
         }
@@ -429,7 +444,10 @@ def normalize_proposals(payload: dict[str, Any]) -> list[dict[str, Any]]:
 
 
 def score_proposal_for_gate(proposal: dict[str, Any], bottleneck: dict[str, Any], memory: dict[str, Any]) -> tuple[float, list[str]]:
-    text = " ".join(str(proposal.get(k, "")) for k in ("summary", "hypothesis", "change", "expected", "risk")).lower()
+    text = " ".join(str(proposal.get(k, "")) for k in (
+        "summary", "hypothesis", "change", "expected", "risk",
+        "family", "primitive", "transform", "target_bottleneck",
+    )).lower()
     targets = " ".join(str(t).lower() for t in proposal.get("targets", []))
     combined = f"{text} {targets}"
     score = 0.0
@@ -454,6 +472,19 @@ def score_proposal_for_gate(proposal: dict[str, Any], bottleneck: dict[str, Any]
             reasons.append("targets complexity")
 
     op_type = proposal.get("op_type")
+    family = str(proposal.get("family") or "unknown")
+    if family in ALLOWED_PROPOSAL_FAMILIES:
+        score += 0.6
+        reasons.append(f"known family: {family}")
+    else:
+        score -= 0.7
+        reasons.append("unknown factor family")
+    if family in {"path_quality", "low_turnover_state", "signal_stability"}:
+        score += 0.8
+        reasons.append("preferred stability family")
+    if family in {"price_volume_divergence", "liquidity_shock", "orthogonal_residual"}:
+        score += 0.4
+        reasons.append("diversifying family")
     if op_type == "add_factor":
         score -= 0.8
         reasons.append("add_factor risk")
@@ -466,6 +497,9 @@ def score_proposal_for_gate(proposal: dict[str, Any], bottleneck: dict[str, Any]
     if proposal.get("summary", "").lower()[:60] and proposal.get("summary", "").lower()[:60] in recent_avoid:
         score -= 3.0
         reasons.append("resembles recent avoid")
+    if family != "unknown" and family in recent_avoid and family not in {"signal_stability", "path_quality"}:
+        score -= 1.0
+        reasons.append("family appears in recent avoid")
     if any(w in combined for w in ("lightgbm", "mlp", "torch", "ridgecv", "black box", "黑盒")):
         score -= 1.5
         reasons.append("complex model risk")
@@ -482,9 +516,22 @@ def select_proposal(proposals: list[dict[str, Any]], bottleneck: dict[str, Any],
         item["gate_score"] = round(score, 4)
         item["gate_reasons"] = reasons
         scored.append(item)
+    family_counts: dict[str, int] = {}
+    for item in scored:
+        family = str(item.get("family") or "unknown")
+        family_counts[family] = family_counts.get(family, 0) + 1
+    for item in scored:
+        family = str(item.get("family") or "unknown")
+        if family != "unknown" and family_counts.get(family, 0) == 1:
+            item["gate_score"] = round(float(item["gate_score"]) + 0.35, 4)
+            item["gate_reasons"] = item.get("gate_reasons", []) + ["unique family in candidate set"]
+        elif family != "unknown":
+            item["gate_score"] = round(float(item["gate_score"]) - 0.35, 4)
+            item["gate_reasons"] = item.get("gate_reasons", []) + ["duplicate family in candidate set"]
     scored.sort(key=lambda x: x["gate_score"], reverse=True)
-    selected = scored[0]
-    selected["all_candidates"] = scored
+    candidates = [dict(item) for item in scored]
+    selected = dict(candidates[0])
+    selected["all_candidates"] = candidates
     return selected
 
 
@@ -753,6 +800,7 @@ Use this memory to avoid repeating failed ideas and to build on accepted or prom
         "memory_block": memory_block,
         "program": read_text("program.md"),
         "evaluation": read_text("evaluation.md"),
+        "factor_grammar": read_text("factor_grammar.md"),
         "alpha": read_text("alpha.py", max_chars=40000),
         "status": latest_runner_status(),
         "bottleneck": detect_bottlenecks(),
@@ -771,9 +819,11 @@ We need proposal candidates for the next AutoAlpha iteration.
 Rules:
 - Return a JSON object with exactly one key: proposals.
 - proposals must contain exactly 3 candidate objects.
-- Each object must contain: id, summary, hypothesis, change, expected, op_type, targets, risk.
+- Each object must contain: id, summary, hypothesis, change, expected, op_type, family, primitive, transform, target_bottleneck, targets, risk.
 - Do not write alpha_py in this response.
 - Each proposal must be a single-point experiment.
+- The 3 proposals should use 3 different family values from factor_grammar.md whenever possible.
+- Use factor_grammar.md as the allowed vocabulary for family/primitive/transform.
 - Prefer candidates that address the bottleneck detector below.
 - Avoid repeating recent rejected ideas in memory.
 - Avoid tiny half-life/window/label tweaks unless the bottleneck clearly demands them.
@@ -790,6 +840,9 @@ program.md:
 
 evaluation.md:
 {ctx["evaluation"]}
+
+factor_grammar.md:
+{ctx["factor_grammar"]}
 
 Current alpha.py summary only:
 - Full code will be provided after proposal selection.
@@ -832,6 +885,9 @@ program.md:
 
 evaluation.md:
 {ctx["evaluation"]}
+
+factor_grammar.md:
+{ctx["factor_grammar"]}
 
 current alpha.py:
 {ctx["alpha"]}
@@ -1526,7 +1582,7 @@ INDEX_HTML = r"""<!doctype html>
       }
       if (rec.kind === 'research' && rec.event === 'proposal_gate_selected') {
         const selected = p.selected || {};
-        return { title: `Proposal gate · 已选择`, summary: shortText(selected.summary || selected.hypothesis || '已选择一个候选进入实现阶段。', 320), chips: [`iter ${p.iteration}`, `gate ${fmt(Number(selected.gate_score), 2)}`, selected.op_type || '--'] };
+        return { title: `Proposal gate · 已选择`, summary: shortText(selected.summary || selected.hypothesis || '已选择一个候选进入实现阶段。', 320), chips: [`iter ${p.iteration}`, `gate ${fmt(Number(selected.gate_score), 2)}`, selected.family || '--', selected.op_type || '--'] };
       }
       if (rec.kind === 'research' && rec.event === 'implementation_context_built') {
         return { title: `实现上下文已构建`, summary: `已把 gate 选中的候选和完整 alpha.py 发给模型实现。`, chips: [`iter ${p.iteration}`, `messages ${p.message_count}`] };
