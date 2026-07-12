@@ -10,12 +10,12 @@ LABEL_KIND: str = 'rank'
 FACTOR_NAME: str = 'demo_v1_h20_rank_composite_icir_decay'
 
 ITER_NOTE: dict = {
-    'op_type': 'other',
-    'hypothesis': '在ICIR加权组合信号后添加指数加权移动平均平滑(span=3)，降低日间噪声和换手，预期提高收益/回撤效率和年度稳定性，减少换手惩罚。',
-    'change': '在run()中，将combine_icir_weight的输出通过.ewm(span=3, min_periods=1, adjust=False)平滑，然后再进行最终截面rank。',
-    'expected': 'score可能提升0.2-0.5，因为换手惩罚降低、效率提升；IC可能微跌。',
-    'parent_iter': 166,
-    'reasoning': '当前best score 5.49，年换手可能偏高；轻量平滑是低风险改造，符合Phase 2低换手研究方向。'
+    'op_type': 'preprocess',
+    'hypothesis': 'A rolling median filter (window=3) is more robust to outlier daily signals than EWM smoothing, reducing turnover and improving year-to-year stability while preserving sustained trends.',
+    'change': 'Replace the post-combination EWM smoothing (span=3) with a 3-day rolling median filter applied to the final raw signal per stock, then re-apply cs_rank_zscore.',
+    'expected': 'Score +0.05–0.15 from lower turnover penalty and improved year_stability; minimal IC impact.',
+    'parent_iter': 167,
+    'reasoning': 'Current best (iter 167) uses EWM smoothing; rolling median may further reduce turnover and improve stability, aligning with Phase 2 goals.'
 }
 
 
@@ -334,10 +334,9 @@ def run(train_panel: pd.DataFrame, val_panel: pd.DataFrame) -> tuple[pd.DataFram
     weights = _icir_weights(fps_train, train_panel)
     sig_train_raw = combine_icir_weight(fps_train, weights)
     sig_val_raw = combine_icir_weight(fps_val, weights)
-    # Apply time-series EWM smoothing to reduce turnover
-    # Smooth each stock's signal over time to dampen day-to-day noise
-    sig_train_smooth = sig_train_raw.ewm(span=3, min_periods=1, adjust=False).mean()
-    sig_val_smooth = sig_val_raw.ewm(span=3, min_periods=1, adjust=False).mean()
+    # Apply 3-day rolling median smoothing per stock over time to reduce outlier noise
+    sig_train_smooth = sig_train_raw.rolling(window=3, min_periods=1, center=False).median()
+    sig_val_smooth = sig_val_raw.rolling(window=3, min_periods=1, center=False).median()
     return _finalize(sig_train_smooth), _finalize(sig_val_smooth)
 
 
